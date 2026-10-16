@@ -1,0 +1,4336 @@
+diff --git a/src/android/app/src/main/AndroidManifest.xml b/src/android/app/src/main/AndroidManifest.xml
+--- a/src/android/app/src/main/AndroidManifest.xml
++++ b/src/android/app/src/main/AndroidManifest.xml
+@@ -73,6 +73,13 @@ SPDX-License-Identifier: GPL-3.0-or-later
+             android:theme="@style/Theme.Yuzu.Main"
+             android:label="@string/preferences_settings"/>
+ 
++        <activity
++            android:name="org.yuzu.yuzu_emu.overlay.OverlayColorActivity"
++            android:theme="@style/Theme.Yuzu.Main"
++            android:label="@string/overlay_color"
++            android:exported="false"
++            android:windowSoftInputMode="adjustResize"/>
++
+         <activity
+             android:name="org.yuzu.yuzu_emu.features.settings.ui.SettingsSubscreenActivity"
+             android:theme="@style/Theme.Yuzu.Main"
+diff --git a/src/android/app/src/main/java/org/yuzu/yuzu_emu/features/settings/model/IntSetting.kt b/src/android/app/src/main/java/org/yuzu/yuzu_emu/features/settings/model/IntSetting.kt
+--- a/src/android/app/src/main/java/org/yuzu/yuzu_emu/features/settings/model/IntSetting.kt
++++ b/src/android/app/src/main/java/org/yuzu/yuzu_emu/features/settings/model/IntSetting.kt
+@@ -41,6 +41,7 @@ enum class IntSetting(override val key: String) : AbstractIntSetting {
+     APP_LANGUAGE("app_language"),
+     OVERLAY_SCALE("control_scale"),
+     OVERLAY_OPACITY("control_opacity"),
++    OVERLAY_COLOR("overlay_color"),
+     LOCK_DRAWER("lock_drawer"),
+     VERTICAL_ALIGNMENT("vertical_alignment"),
+     PERF_OVERLAY_POSITION("perf_overlay_position"),
+diff --git a/src/android/app/src/main/java/org/yuzu/yuzu_emu/features/settings/model/Settings.kt b/src/android/app/src/main/java/org/yuzu/yuzu_emu/features/settings/model/Settings.kt
+--- a/src/android/app/src/main/java/org/yuzu/yuzu_emu/features/settings/model/Settings.kt
++++ b/src/android/app/src/main/java/org/yuzu/yuzu_emu/features/settings/model/Settings.kt
+@@ -15,6 +15,7 @@ object Settings {
+         SECTION_POST_PROCESSING(R.string.post_processing),
+         SECTION_PERFORMANCE_STATS(R.string.stats_overlay_options),
+         SECTION_INPUT_OVERLAY(R.string.input_overlay_options),
++        SECTION_OVERLAY_COLOR(R.string.overlay_color_customize),
+         SECTION_SOC_OVERLAY(R.string.soc_overlay_options),
+         SECTION_AUDIO(R.string.preferences_audio),
+         SECTION_INPUT(R.string.preferences_controls),
+diff --git a/src/android/app/src/main/java/org/yuzu/yuzu_emu/features/settings/ui/SettingsFragment.kt b/src/android/app/src/main/java/org/yuzu/yuzu_emu/features/settings/ui/SettingsFragment.kt
+--- a/src/android/app/src/main/java/org/yuzu/yuzu_emu/features/settings/ui/SettingsFragment.kt
++++ b/src/android/app/src/main/java/org/yuzu/yuzu_emu/features/settings/ui/SettingsFragment.kt
+@@ -27,7 +27,11 @@ import androidx.navigation.fragment.navArgs
+ import androidx.recyclerview.widget.LinearLayoutManager
+ import com.google.android.material.dialog.MaterialAlertDialogBuilder
+ import com.google.android.material.transition.MaterialSharedAxis
++import android.app.Activity
++import androidx.appcompat.app.AppCompatActivity
+ import org.yuzu.yuzu_emu.R
++import org.yuzu.yuzu_emu.overlay.OverlayColorConfigTransfer
++import org.yuzu.yuzu_emu.overlay.OverlayPresetLibrary
+ import org.yuzu.yuzu_emu.databinding.FragmentSettingsBinding
+ import org.yuzu.yuzu_emu.features.input.NativeInput
+ import org.yuzu.yuzu_emu.features.settings.model.Settings
+@@ -50,6 +54,24 @@ class SettingsFragment : Fragment() {
+ 
+     private val settingsViewModel: SettingsViewModel by activityViewModels()
+ 
++    private lateinit var overlayColorConfigTransfer: OverlayColorConfigTransfer
++
++    private val overlayColorImportLauncher = registerForActivityResult(
++        ActivityResultContracts.OpenDocument()
++    ) { uri ->
++        if (uri != null) {
++            overlayColorConfigTransfer.handleImportUri(uri)
++        }
++    }
++
++    private val overlayColorExportLauncher = registerForActivityResult(
++        ActivityResultContracts.CreateDocument(OverlayPresetLibrary.EXPORT_MIME_TYPE)
++    ) { uri ->
++        if (uri != null) {
++            overlayColorConfigTransfer.handleExportUri(uri)
++        }
++    }
++
+     private val requestAllFilesPermissionLauncher = registerForActivityResult(
+         ActivityResultContracts.StartActivityForResult()
+     ) {
+@@ -97,6 +119,25 @@ class SettingsFragment : Fragment() {
+             args.menuTag,
+             activity
+         )
++        overlayColorConfigTransfer = OverlayColorConfigTransfer(
++            requireActivity() as AppCompatActivity,
++            binding.root,
++            onImportApplied = {
++                if (this::presenter.isInitialized) {
++                    presenter.loadSettingsList(true)
++                }
++            }
++        )
++        presenter.launchOverlayColorImport = {
++            overlayColorConfigTransfer.launchImport { types ->
++                overlayColorImportLauncher.launch(types)
++            }
++        }
++        presenter.launchOverlayColorExport = {
++            overlayColorConfigTransfer.launchExport { filename ->
++                overlayColorExportLauncher.launch(filename)
++            }
++        }
+ 
+         val toolbarTitle = resolveToolbarTitle()
+         configureToolbar(toolbarTitle)
+diff --git a/src/android/app/src/main/java/org/yuzu/yuzu_emu/features/settings/ui/SettingsFragmentPresenter.kt b/src/android/app/src/main/java/org/yuzu/yuzu_emu/features/settings/ui/SettingsFragmentPresenter.kt
+--- a/src/android/app/src/main/java/org/yuzu/yuzu_emu/features/settings/ui/SettingsFragmentPresenter.kt
++++ b/src/android/app/src/main/java/org/yuzu/yuzu_emu/features/settings/ui/SettingsFragmentPresenter.kt
+@@ -37,6 +37,8 @@ import org.yuzu.yuzu_emu.utils.FullscreenHelper
+ import androidx.core.content.edit
+ import androidx.fragment.app.FragmentActivity
+ import org.yuzu.yuzu_emu.fragments.MessageDialogFragment
++import org.yuzu.yuzu_emu.overlay.OverlayColorActivity
++import org.yuzu.yuzu_emu.overlay.OverlayColors
+ 
+ class SettingsFragmentPresenter(
+     private val settingsViewModel: SettingsViewModel,
+@@ -56,6 +58,9 @@ class SettingsFragmentPresenter(
+ 
+     private val context get() = YuzuApplication.appContext
+ 
++    var launchOverlayColorImport: (() -> Unit)? = null
++    var launchOverlayColorExport: (() -> Unit)? = null
++
+     // Extension for altering settings list based on each setting's properties
+     fun ArrayList<SettingsItem>.add(key: String) {
+         val item = SettingsItem.settingsItems[key]!!
+@@ -176,6 +181,7 @@ class SettingsFragmentPresenter(
+             MenuTag.SECTION_PERFORMANCE_STATS -> addPerformanceOverlaySettings(sl)
+             MenuTag.SECTION_SOC_OVERLAY -> addSocOverlaySettings(sl)
+             MenuTag.SECTION_INPUT_OVERLAY -> addInputOverlaySettings(sl)
++            MenuTag.SECTION_OVERLAY_COLOR -> addOverlayColorSettings(sl)
+             MenuTag.SECTION_AUDIO -> addAudioSettings(sl)
+             MenuTag.SECTION_INPUT -> addInputSettings(sl)
+             MenuTag.SECTION_INPUT_PLAYER_ONE -> addInputPlayer(sl, 0)
+@@ -601,6 +607,14 @@ class SettingsFragmentPresenter(
+             add(BooleanSetting.SHOW_INPUT_OVERLAY.key)
+             add(BooleanSetting.OVERLAY_SNAP_TO_GRID.key)
+             add(IntSetting.OVERLAY_GRID_SIZE.key)
++            add(
++                SubmenuSetting(
++                    titleId = R.string.overlay_color_customize,
++                    descriptionId = R.string.overlay_color_customize_summary,
++                    showChevron = true,
++                    menuKey = MenuTag.SECTION_OVERLAY_COLOR
++                )
++            )
+             add(
+                 LaunchableSetting(
+                     titleId = R.string.edit_overlay_layout,
+@@ -617,6 +632,47 @@ class SettingsFragmentPresenter(
+         }
+     }
+ 
++    private fun addOverlayColorSettings(sl: ArrayList<SettingsItem>) {
++        sl.apply {
++            add(HeaderSetting(R.string.overlay_color_section_create_use))
++            add(
++                LaunchableSetting(
++                    titleId = R.string.overlay_color_presets,
++                    descriptionId = R.string.overlay_color_presets_summary,
++                    launchIntent = { host -> OverlayColorActivity.createPresetsIntent(host) }
++                )
++            )
++            add(
++                LaunchableSetting(
++                    titleId = R.string.overlay_color_create_template,
++                    descriptionId = R.string.overlay_color_create_template_summary,
++                    launchIntent = { host -> OverlayColorActivity.createTemplateIntent(host) }
++                )
++            )
++            add(HeaderSetting(R.string.overlay_color_section_manage_files))
++            add(
++                RunnableSetting(
++                    titleId = R.string.overlay_import_color_config,
++                    descriptionId = R.string.overlay_import_color_config_summary,
++                    isRunnable = true,
++                    iconId = R.drawable.ic_import
++                ) {
++                    launchOverlayColorImport?.invoke()
++                }
++            )
++            add(
++                RunnableSetting(
++                    titleId = R.string.overlay_export_color_config,
++                    descriptionId = R.string.overlay_export_color_config_summary,
++                    isRunnable = true,
++                    iconId = R.drawable.ic_export
++                ) {
++                    launchOverlayColorExport?.invoke()
++                }
++            )
++        }
++    }
++
+     private fun addSocOverlaySettings(sl: ArrayList<SettingsItem>) {
+         sl.apply {
+             add(HeaderSetting(R.string.stats_overlay_customization))
+diff --git a/src/android/app/src/main/java/org/yuzu/yuzu_emu/features/settings/ui/viewholder/SubmenuViewHolder.kt b/src/android/app/src/main/java/org/yuzu/yuzu_emu/features/settings/ui/viewholder/SubmenuViewHolder.kt
+--- a/src/android/app/src/main/java/org/yuzu/yuzu_emu/features/settings/ui/viewholder/SubmenuViewHolder.kt
++++ b/src/android/app/src/main/java/org/yuzu/yuzu_emu/features/settings/ui/viewholder/SubmenuViewHolder.kt
+@@ -5,6 +5,7 @@ package org.yuzu.yuzu_emu.features.settings.ui.viewholder
+ 
+ import android.view.View
+ import androidx.core.content.res.ResourcesCompat
++import org.yuzu.yuzu_emu.R
+ import org.yuzu.yuzu_emu.databinding.ListItemSettingBinding
+ import org.yuzu.yuzu_emu.features.settings.model.view.SettingsItem
+ import org.yuzu.yuzu_emu.features.settings.model.view.SubmenuSetting
+@@ -31,7 +32,19 @@ class SubmenuViewHolder(val binding: ListItemSettingBinding, adapter: SettingsAd
+         binding.textSettingName.text = setting.title
+         binding.textSettingDescription.setVisible(setting.description.isNotEmpty())
+         binding.textSettingDescription.text = setting.description
+-        binding.textSettingValue.setVisible(false)
++        if (setting.showChevron) {
++            binding.textSettingValue.setVisible(true)
++            binding.textSettingValue.text = ""
++            binding.textSettingValue.setCompoundDrawablesRelativeWithIntrinsicBounds(
++                0,
++                0,
++                R.drawable.ic_arrow_forward,
++                0
++            )
++        } else {
++            binding.textSettingValue.setVisible(false)
++            binding.textSettingValue.setCompoundDrawablesRelativeWithIntrinsicBounds(0, 0, 0, 0)
++        }
+         binding.buttonClear.setVisible(false)
+     }
+ 
+diff --git a/src/android/app/src/main/java/org/yuzu/yuzu_emu/fragments/EmulationFragment.kt b/src/android/app/src/main/java/org/yuzu/yuzu_emu/fragments/EmulationFragment.kt
+--- a/src/android/app/src/main/java/org/yuzu/yuzu_emu/fragments/EmulationFragment.kt
++++ b/src/android/app/src/main/java/org/yuzu/yuzu_emu/fragments/EmulationFragment.kt
+@@ -78,6 +78,8 @@ import org.yuzu.yuzu_emu.features.settings.model.IntSetting
+ import org.yuzu.yuzu_emu.features.settings.model.Settings
+ import org.yuzu.yuzu_emu.features.settings.model.Settings.EmulationOrientation
+ import org.yuzu.yuzu_emu.features.settings.model.Settings.EmulationVerticalAlignment
++import org.yuzu.yuzu_emu.overlay.OverlayColorActivity
++import org.yuzu.yuzu_emu.overlay.OverlayColors
+ import org.yuzu.yuzu_emu.features.settings.model.ShortSetting
+ import org.yuzu.yuzu_emu.features.settings.utils.SettingsFile
+ import org.yuzu.yuzu_emu.model.DriverViewModel
+@@ -157,6 +159,13 @@ class EmulationFragment : Fragment(), SurfaceHolder.Callback {
+     private var isQuickSettingsMenuOpen = false
+     private val quickSettings = QuickSettings(this)
+ 
++    private val overlayColorLauncher =
++        registerForActivityResult(ActivityResultContracts.StartActivityForResult()) {
++            if (_binding != null) {
++                binding.surfaceInputOverlay.refreshControls()
++            }
++        }
++
+     private val loadAmiiboLauncher =
+         registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+             isAmiiboPickerOpen = false
+@@ -1515,6 +1524,7 @@ class EmulationFragment : Fragment(), SurfaceHolder.Callback {
+     private fun resetInputOverlay() {
+         IntSetting.OVERLAY_SCALE.reset()
+         IntSetting.OVERLAY_OPACITY.reset()
++        resetOverlayColors()
+         binding.surfaceInputOverlay.post {
+             binding.surfaceInputOverlay.resetLayoutVisibilityAndPlacement()
+             binding.surfaceInputOverlay.resetIndividualControlScale()
+@@ -2071,6 +2081,12 @@ class EmulationFragment : Fragment(), SurfaceHolder.Callback {
+                     true
+                 }
+ 
++                R.id.menu_overlay_color -> {
++                    binding.drawerLayout.close()
++                    overlayColorLauncher.launch(OverlayColorActivity.createIntent(requireContext()))
++                    true
++                }
++
+                 R.id.menu_toggle_controls -> {
+                     val overlayControlData = NativeConfig.getOverlayControlData()
+                     val optionsArray = BooleanArray(overlayControlData.size)
+@@ -2217,7 +2233,9 @@ class EmulationFragment : Fragment(), SurfaceHolder.Callback {
+             .setNeutralButton(R.string.slider_default) { _: DialogInterface?, _: Int ->
+                 setControlScale(50)
+                 setControlOpacity(100)
++                resetOverlayColors()
+                 binding.surfaceInputOverlay.resetIndividualControlScale()
++                NativeConfig.saveGlobalConfig()
+             }
+             .show()
+     }
+@@ -2232,6 +2250,11 @@ class EmulationFragment : Fragment(), SurfaceHolder.Callback {
+         binding.surfaceInputOverlay.refreshControls()
+     }
+ 
++    private fun resetOverlayColors() {
++        OverlayColors.write(OverlayColors.DEFAULT_COLOR, emptyMap())
++        binding.surfaceInputOverlay.refreshControls()
++    }
++
+     private fun setInsets() {
+         ViewCompat.setOnApplyWindowInsetsListener(
+             binding.inGameMenu
+diff --git a/src/android/app/src/main/java/org/yuzu/yuzu_emu/overlay/InputOverlay.kt b/src/android/app/src/main/java/org/yuzu/yuzu_emu/overlay/InputOverlay.kt
+--- a/src/android/app/src/main/java/org/yuzu/yuzu_emu/overlay/InputOverlay.kt
++++ b/src/android/app/src/main/java/org/yuzu/yuzu_emu/overlay/InputOverlay.kt
+@@ -9,6 +9,8 @@ import android.content.SharedPreferences
+ import android.graphics.Bitmap
+ import android.graphics.Canvas
+ import android.graphics.Color
++import android.graphics.ColorMatrix
++import android.graphics.ColorMatrixColorFilter
+ import android.graphics.Paint
+ import android.graphics.Point
+ import android.graphics.Rect
+@@ -60,6 +62,14 @@ class InputOverlay(context: Context, attrs: AttributeSet?) :
+ 
+     private var inEditMode = false
+     private var gamelessMode = false
++    private var staticPreviewMode = false
++    private var previewBody = OverlayColors.DEFAULT_COLOR
++    private var previewFace = OverlayColors.FACE_LETTERS
++    private var previewOverrides: Map<String, Int> = emptyMap()
++    private var previewControlData: List<OverlayControlData>? = null
++    private var previewLayoutWidth = 0
++    private var previewLayoutHeight = 0
++    private var previewControlsDirty = true
+     private var buttonBeingConfigured: InputOverlayDrawableButton? = null
+     private var dpadBeingConfigured: InputOverlayDrawableDpad? = null
+     private var joystickBeingConfigured: InputOverlayDrawableJoystick? = null
+@@ -143,6 +153,22 @@ class InputOverlay(context: Context, attrs: AttributeSet?) :
+     override fun onLayout(changed: Boolean, left: Int, top: Int, right: Int, bottom: Int) {
+         super.onLayout(changed, left, top, right, bottom)
+ 
++        if (staticPreviewMode) {
++            previewControlData = previewControlData
++                ?: OverlayPreviewLayout.snapshotControlData()
++            val w = right - left
++            val h = bottom - top
++            if (previewControlsDirty || w != previewLayoutWidth || h != previewLayoutHeight) {
++                previewLayoutWidth = w
++                previewLayoutHeight = h
++                previewControlsDirty = false
++                refreshControls(gameless = true)
++            }
++            setWillNotDraw(false)
++            isClickable = false
++            return
++        }
++
+         windowInsets = rootWindowInsets
+ 
+         val overlayControlData = NativeConfig.getOverlayControlData()
+@@ -165,6 +191,45 @@ class InputOverlay(context: Context, attrs: AttributeSet?) :
+         requestFocus()
+     }
+ 
++    /**
++     * Renders the user's current overlay layout with preset colors (positions, enabled controls,
++     * and per-control scale from [NativeConfig]; global scale/opacity from settings).
++     */
++    fun applyStaticPreview(body: Int, face: String, overrides: Map<String, Int>) {
++        staticPreviewMode = true
++        gamelessMode = true
++        previewBody = body or 0xFF000000.toInt()
++        previewFace = face
++        previewOverrides = overrides
++        previewControlData = OverlayPreviewLayout.snapshotControlData()
++        previewControlsDirty = true
++        previewLayoutWidth = 0
++        previewLayoutHeight = 0
++        layout = OverlayLayout.Landscape
++        isClickable = false
++        isFocusable = false
++        isFocusableInTouchMode = false
++        setOnTouchListener(null)
++        if (measuredWidth > 0 && measuredHeight > 0) {
++            refreshControls(gameless = true)
++        } else {
++            requestLayout()
++        }
++        invalidate()
++    }
++
++    private fun previewColorFor(controlId: String): Int =
++        previewOverrides[controlId] ?: previewBody
++
++    private fun previewArtwork(id: String, normal: Int, pressed: Int): Pair<Int, Int> =
++        normal to pressed
++
++    private fun overlayScaleFactor(): Float =
++        (IntSetting.OVERLAY_SCALE.getInt() + 50).toFloat() / 100f
++
++    private fun overlayOpacity(): Int =
++        IntSetting.OVERLAY_OPACITY.getInt() * 255 / 100
++
+     override fun draw(canvas: Canvas) {
+         super.draw(canvas)
+ 
+@@ -223,7 +288,18 @@ class InputOverlay(context: Context, attrs: AttributeSet?) :
+         }
+     }
+ 
++    override fun dispatchTouchEvent(event: MotionEvent): Boolean {
++        if (staticPreviewMode) {
++            return false
++        }
++        return super.dispatchTouchEvent(event)
++    }
++
+     override fun onTouch(v: View, event: MotionEvent): Boolean {
++        if (staticPreviewMode) {
++            return false
++        }
++
+         try {
+             touchEventListener?.invoke(event)
+         } catch (e: Exception) {}
+@@ -541,21 +617,36 @@ class InputOverlay(context: Context, attrs: AttributeSet?) :
+ 
+     private fun addOverlayControls(layout: OverlayLayout) {
+         val windowSize = getSafeScreenSize(context, Pair(measuredWidth, measuredHeight))
+-        val overlayControlData = NativeConfig.getOverlayControlData()
++        val overlayControlData: List<OverlayControlData> = if (staticPreviewMode) {
++            previewControlData ?: emptyList()
++        } else {
++            NativeConfig.getOverlayControlData().toList()
++        }
+         for (data in overlayControlData) {
+             if (!data.enabled) {
+                 continue
+             }
+ 
+             val position = data.positionFromLayout(layout)
++            fun artwork(id: String, normal: Int, pressed: Int): Pair<Int, Int> =
++                if (staticPreviewMode) {
++                    previewArtwork(id, normal, pressed)
++                } else {
++                    normal to pressed
++                }
+             when (data.id) {
+                 OverlayControl.BUTTON_A.id -> {
++                    val (normal, pressed) = artwork(
++                        data.id,
++                        R.drawable.facebutton_a,
++                        R.drawable.facebutton_a_depressed
++                    )
+                     overlayButtons.add(
+                         initializeOverlayButton(
+                             context,
+                             windowSize,
+-                            R.drawable.facebutton_a,
+-                            R.drawable.facebutton_a_depressed,
++                            normal,
++                            pressed,
+                             NativeButton.A,
+                             data,
+                             position
+@@ -564,12 +655,17 @@ class InputOverlay(context: Context, attrs: AttributeSet?) :
+                 }
+ 
+                 OverlayControl.BUTTON_B.id -> {
++                    val (normal, pressed) = artwork(
++                        data.id,
++                        R.drawable.facebutton_b,
++                        R.drawable.facebutton_b_depressed
++                    )
+                     overlayButtons.add(
+                         initializeOverlayButton(
+                             context,
+                             windowSize,
+-                            R.drawable.facebutton_b,
+-                            R.drawable.facebutton_b_depressed,
++                            normal,
++                            pressed,
+                             NativeButton.B,
+                             data,
+                             position
+@@ -578,12 +674,17 @@ class InputOverlay(context: Context, attrs: AttributeSet?) :
+                 }
+ 
+                 OverlayControl.BUTTON_X.id -> {
++                    val (normal, pressed) = artwork(
++                        data.id,
++                        R.drawable.facebutton_x,
++                        R.drawable.facebutton_x_depressed
++                    )
+                     overlayButtons.add(
+                         initializeOverlayButton(
+                             context,
+                             windowSize,
+-                            R.drawable.facebutton_x,
+-                            R.drawable.facebutton_x_depressed,
++                            normal,
++                            pressed,
+                             NativeButton.X,
+                             data,
+                             position
+@@ -592,12 +693,17 @@ class InputOverlay(context: Context, attrs: AttributeSet?) :
+                 }
+ 
+                 OverlayControl.BUTTON_Y.id -> {
++                    val (normal, pressed) = artwork(
++                        data.id,
++                        R.drawable.facebutton_y,
++                        R.drawable.facebutton_y_depressed
++                    )
+                     overlayButtons.add(
+                         initializeOverlayButton(
+                             context,
+                             windowSize,
+-                            R.drawable.facebutton_y,
+-                            R.drawable.facebutton_y_depressed,
++                            normal,
++                            pressed,
+                             NativeButton.Y,
+                             data,
+                             position
+@@ -1001,378 +1107,321 @@ class InputOverlay(context: Context, attrs: AttributeSet?) :
+         return inEditMode
+     }
+ 
+-    companion object {
++    private fun getBitmap(
++        context: Context,
++        drawableId: Int,
++        scale: Float,
++        controlId: String
++    ): Bitmap {
++        val vectorDrawable = ContextCompat.getDrawable(context, drawableId) as VectorDrawable
++
++        val bitmap = Bitmap.createBitmap(
++            (vectorDrawable.intrinsicWidth * scale).toInt(),
++            (vectorDrawable.intrinsicHeight * scale).toInt(),
++            Bitmap.Config.ARGB_8888
++        )
+ 
+-        // Increase this number every time there is a breaking change to every overlay layout
+-        const val OVERLAY_VERSION = 1
++        val dm = context.resources.displayMetrics
++        val minScreenDimension = if (staticPreviewMode) {
++            // Same rule as landscape emulation: scale from the shorter edge of the playable area.
++            min(measuredWidth, measuredHeight).coerceAtLeast(1)
++        } else {
++            min(dm.widthPixels, dm.heightPixels)
++        }
+ 
+-        // Increase the corresponding layout version number whenever that layout has a breaking change
+-        private const val LANDSCAPE_OVERLAY_VERSION = 1
+-        private const val PORTRAIT_OVERLAY_VERSION = 1
+-        private const val FOLDABLE_OVERLAY_VERSION = 1
+-        val overlayLayoutVersions = listOf(
+-            LANDSCAPE_OVERLAY_VERSION,
+-            PORTRAIT_OVERLAY_VERSION,
+-            FOLDABLE_OVERLAY_VERSION
+-        )
++        val maxBitmapDimension = max(bitmap.width, bitmap.height)
++        val bitmapScale = scale * minScreenDimension / maxBitmapDimension
+ 
+-        /**
+-         * Resizes a [Bitmap] by a given scale factor
+-         *
+-         * @param context       Context for getting the vector drawable
+-         * @param drawableId    The ID of the drawable to scale.
+-         * @param scale         The scale factor for the bitmap.
+-         * @return The scaled [Bitmap]
+-         */
+-        private fun getBitmap(context: Context, drawableId: Int, scale: Float): Bitmap {
+-            val vectorDrawable = ContextCompat.getDrawable(context, drawableId) as VectorDrawable
+-
+-            val bitmap = Bitmap.createBitmap(
+-                (vectorDrawable.intrinsicWidth * scale).toInt(),
+-                (vectorDrawable.intrinsicHeight * scale).toInt(),
+-                Bitmap.Config.ARGB_8888
+-            )
++        val scaledBitmap = Bitmap.createScaledBitmap(
++            bitmap,
++            (bitmap.width * bitmapScale).toInt(),
++            (bitmap.height * bitmapScale).toInt(),
++            true
++        )
++        if (bitmap !== scaledBitmap) {
++            bitmap.recycle()
++        }
+ 
+-            val dm = context.resources.displayMetrics
+-            val minScreenDimension = min(dm.widthPixels, dm.heightPixels)
++        val canvas = Canvas(scaledBitmap)
++        vectorDrawable.setBounds(0, 0, canvas.width, canvas.height)
++        vectorDrawable.draw(canvas)
++        val tint = if (staticPreviewMode) {
++            previewColorFor(controlId)
++        } else {
++            OverlayColors.colorFor(controlId)
++        }
++        return applyOverlayTint(scaledBitmap, tint)
++    }
+ 
+-            val maxBitmapDimension = max(bitmap.width, bitmap.height)
+-            val bitmapScale = scale * minScreenDimension / maxBitmapDimension
++    private fun applyOverlayTint(source: Bitmap, tint: Int): Bitmap {
++        val opaque = tint or 0xFF000000.toInt()
++        val red = Color.red(opaque) / 255f
++        val green = Color.green(opaque) / 255f
++        val blue = Color.blue(opaque) / 255f
++        if (red >= 0.999f && green >= 0.999f && blue >= 0.999f) {
++            return source
++        }
++        if (source.width <= 0 || source.height <= 0) {
++            return source
++        }
+ 
+-            val scaledBitmap = Bitmap.createScaledBitmap(
+-                bitmap,
+-                (bitmap.width * bitmapScale).toInt(),
+-                (bitmap.height * bitmapScale).toInt(),
+-                true
++        val tinted = Bitmap.createBitmap(source.width, source.height, Bitmap.Config.ARGB_8888)
++        val canvas = Canvas(tinted)
++        val paint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG).apply {
++            colorFilter = ColorMatrixColorFilter(
++                ColorMatrix(
++                    floatArrayOf(
++                        red, 0f, 0f, 0f, 0f,
++                        0f, green, 0f, 0f, 0f,
++                        0f, 0f, blue, 0f, 0f,
++                        0f, 0f, 0f, 1f, 0f
++                    )
++                )
+             )
++        }
++        canvas.drawBitmap(source, 0f, 0f, paint)
++        source.recycle()
++        return tinted
++    }
+ 
+-            val canvas = Canvas(scaledBitmap)
+-            vectorDrawable.setBounds(0, 0, canvas.width, canvas.height)
+-            vectorDrawable.draw(canvas)
+-            return scaledBitmap
++    private fun getSafeScreenSize(
++        context: Context,
++        screenSize: Pair<Int, Int>
++    ): Pair<Point, Point> {
++        if (staticPreviewMode) {
++            return Pair(Point(0, 0), Point(screenSize.first, screenSize.second))
+         }
+ 
+-        /**
+-         * Gets the safe screen size for drawing the overlay
+-         *
+-         * @param context   Context for getting the window metrics
+-         * @return A pair of points, the first being the top left corner of the safe area,
+-         *                  the second being the bottom right corner of the safe area
+-         */
+-        private fun getSafeScreenSize(
+-            context: Context,
+-            screenSize: Pair<Int, Int>
+-        ): Pair<Point, Point> {
+-            // Get screen size
+-            val windowMetrics = WindowMetricsCalculator.getOrCreate()
+-                .computeCurrentWindowMetrics(context as Activity)
+-            var maxX = screenSize.first.toFloat()
+-            var maxY = screenSize.second.toFloat()
+-            var minX = 0
+-            var minY = 0
+-
+-            // If we have API access, calculate the safe area to draw the overlay
+-            var cutoutLeft = 0
+-            var cutoutBottom = 0
+-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+-                val insets = context.windowManager.currentWindowMetrics.windowInsets.displayCutout
+-                if (insets != null) {
+-                    if (insets.boundingRectTop.bottom != 0 &&
+-                        insets.boundingRectTop.bottom > maxY / 2
+-                    ) {
+-                        maxY = insets.boundingRectTop.bottom.toFloat()
+-                    }
+-                    if (insets.boundingRectRight.left != 0 &&
+-                        insets.boundingRectRight.left > maxX / 2
+-                    ) {
+-                        maxX = insets.boundingRectRight.left.toFloat()
+-                    }
++        val windowMetrics = WindowMetricsCalculator.getOrCreate()
++            .computeCurrentWindowMetrics(context as Activity)
++        var maxX = screenSize.first.toFloat()
++        var maxY = screenSize.second.toFloat()
++        var minX = 0
++        var minY = 0
++
++        var cutoutLeft = 0
++        var cutoutBottom = 0
++        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
++            val insets = context.windowManager.currentWindowMetrics.windowInsets.displayCutout
++            if (insets != null) {
++                if (insets.boundingRectTop.bottom != 0 &&
++                    insets.boundingRectTop.bottom > maxY / 2
++                ) {
++                    maxY = insets.boundingRectTop.bottom.toFloat()
++                }
++                if (insets.boundingRectRight.left != 0 &&
++                    insets.boundingRectRight.left > maxX / 2
++                ) {
++                    maxX = insets.boundingRectRight.left.toFloat()
++                }
+ 
+-                    minX = insets.boundingRectLeft.right - insets.boundingRectLeft.left
+-                    minY = insets.boundingRectBottom.top - insets.boundingRectBottom.bottom
++                minX = insets.boundingRectLeft.right - insets.boundingRectLeft.left
++                minY = insets.boundingRectBottom.top - insets.boundingRectBottom.bottom
+ 
+-                    cutoutLeft = insets.boundingRectRight.right - insets.boundingRectRight.left
+-                    cutoutBottom = insets.boundingRectTop.top - insets.boundingRectTop.bottom
+-                }
++                cutoutLeft = insets.boundingRectRight.right - insets.boundingRectRight.left
++                cutoutBottom = insets.boundingRectTop.top - insets.boundingRectTop.bottom
+             }
++        }
+ 
+-            // This makes sure that if we have an inset on one side of the screen, we mirror it on
+-            // the other side. Since removing space from one of the max values messes with the scale,
+-            // we also have to account for it using our min values.
+-            if (maxX.toInt() != windowMetrics.bounds.width()) minX += cutoutLeft
+-            if (maxY.toInt() != windowMetrics.bounds.height()) minY += cutoutBottom
+-            if (minX > 0 && maxX.toInt() == windowMetrics.bounds.width()) {
+-                maxX -= (minX * 2)
+-            } else if (minX > 0) {
+-                maxX -= minX
+-            }
+-            if (minY > 0 && maxY.toInt() == windowMetrics.bounds.height()) {
+-                maxY -= (minY * 2)
+-            } else if (minY > 0) {
+-                maxY -= minY
+-            }
++        if (maxX.toInt() != windowMetrics.bounds.width()) minX += cutoutLeft
++        if (maxY.toInt() != windowMetrics.bounds.height()) minY += cutoutBottom
++        if (minX > 0 && maxX.toInt() == windowMetrics.bounds.width()) {
++            maxX -= (minX * 2)
++        } else if (minX > 0) {
++            maxX -= minX
++        }
++        if (minY > 0 && maxY.toInt() == windowMetrics.bounds.height()) {
++            maxY -= (minY * 2)
++        } else if (minY > 0) {
++            maxY -= minY
++        }
+ 
+-            return Pair(Point(minX, minY), Point(maxX.toInt(), maxY.toInt()))
++        return Pair(Point(minX, minY), Point(maxX.toInt(), maxY.toInt()))
++    }
++
++    private fun initializeOverlayButton(
++        context: Context,
++        windowSize: Pair<Point, Point>,
++        defaultResId: Int,
++        pressedResId: Int,
++        button: NativeButton,
++        overlayControlData: OverlayControlData,
++        position: Pair<Double, Double>
++    ): InputOverlayDrawableButton {
++        val res = context.resources
++
++        var scale: Float = when (overlayControlData.id) {
++            OverlayControl.BUTTON_HOME.id,
++            OverlayControl.BUTTON_CAPTURE.id,
++            OverlayControl.BUTTON_PLUS.id,
++            OverlayControl.BUTTON_MINUS.id -> 0.07f
++
++            OverlayControl.BUTTON_L.id,
++            OverlayControl.BUTTON_R.id,
++            OverlayControl.BUTTON_ZL.id,
++            OverlayControl.BUTTON_ZR.id -> 0.26f
++
++            OverlayControl.BUTTON_STICK_L.id,
++            OverlayControl.BUTTON_STICK_R.id -> 0.155f
++
++            else -> 0.11f
+         }
++        scale *= overlayScaleFactor()
++        scale *= overlayControlData.individualScale.let { if (it > 0f) it else 1f }
++
++        val defaultStateBitmap = getBitmap(context, defaultResId, scale, overlayControlData.id)
++        val pressedStateBitmap = getBitmap(context, pressedResId, scale, overlayControlData.id)
++        val overlayDrawable = InputOverlayDrawableButton(
++            res,
++            defaultStateBitmap,
++            pressedStateBitmap,
++            button,
++            overlayControlData
++        )
+ 
+-        /**
+-         * Initializes an InputOverlayDrawableButton, given by resId, with all of the
+-         * parameters set for it to be properly shown on the InputOverlay.
+-         *
+-         *
+-         * This works due to the way the X and Y coordinates are stored within
+-         * the [SharedPreferences].
+-         *
+-         *
+-         * In the input overlay configuration menu,
+-         * once a touch event begins and then ends (ie. Organizing the buttons to one's own liking for the overlay).
+-         * the X and Y coordinates of the button at the END of its touch event
+-         * (when you remove your finger/stylus from the touchscreen) are then stored in a native .
+-         *
+-         * Technically no modifications should need to be performed on the returned
+-         * InputOverlayDrawableButton. Simply add it to the HashSet of overlay items and wait
+-         * for Android to call the onDraw method.
+-         *
+-         * @param context            The current [Context].
+-         * @param windowSize         The size of the window to draw the overlay on.
+-         * @param defaultResId       The resource ID of the [Drawable] to get the [Bitmap] of (Default State).
+-         * @param pressedResId       The resource ID of the [Drawable] to get the [Bitmap] of (Pressed State).
+-         * @param buttonId           Identifier for determining what type of button the initialized InputOverlayDrawableButton represents.
+-         * @param overlayControlData Identifier for determining where a button appears on screen.
+-         * @param position           The position on screen as represented by an x and y value between 0 and 1.
+-         * @return An [InputOverlayDrawableButton] with the correct drawing bounds set.
+-         */
+-        private fun initializeOverlayButton(
+-            context: Context,
+-            windowSize: Pair<Point, Point>,
+-            defaultResId: Int,
+-            pressedResId: Int,
+-            button: NativeButton,
+-            overlayControlData: OverlayControlData,
+-            position: Pair<Double, Double>
+-        ): InputOverlayDrawableButton {
+-            // Resources handle for fetching the initial Drawable resource.
+-            val res = context.resources
+-
+-            // Decide scale based on button preference ID and user preference
+-            var scale: Float = when (overlayControlData.id) {
+-                OverlayControl.BUTTON_HOME.id,
+-                OverlayControl.BUTTON_CAPTURE.id,
+-                OverlayControl.BUTTON_PLUS.id,
+-                OverlayControl.BUTTON_MINUS.id -> 0.07f
+-
+-                OverlayControl.BUTTON_L.id,
+-                OverlayControl.BUTTON_R.id,
+-                OverlayControl.BUTTON_ZL.id,
+-                OverlayControl.BUTTON_ZR.id -> 0.26f
+-
+-                OverlayControl.BUTTON_STICK_L.id,
+-                OverlayControl.BUTTON_STICK_R.id -> 0.155f
+-
+-                else -> 0.11f
+-            }
+-            scale *= (IntSetting.OVERLAY_SCALE.getInt() + 50).toFloat()
+-            scale /= 100f
+-
+-            // Apply individual scale
+-            scale *= overlayControlData.individualScale.let { if (it > 0f) it else 1f }
+-
+-            // Initialize the InputOverlayDrawableButton.
+-            val defaultStateBitmap = getBitmap(context, defaultResId, scale)
+-            val pressedStateBitmap = getBitmap(context, pressedResId, scale)
+-            val overlayDrawable = InputOverlayDrawableButton(
+-                res,
+-                defaultStateBitmap,
+-                pressedStateBitmap,
+-                button,
+-                overlayControlData
+-            )
++        val min = windowSize.first
++        val max = windowSize.second
++        val drawableX = (position.first * max.x + min.x).toInt()
++        val drawableY = (position.second * max.y + min.y).toInt()
++        val width = overlayDrawable.width
++        val height = overlayDrawable.height
++
++        overlayDrawable.setBounds(
++            drawableX - (width / 2),
++            drawableY - (height / 2),
++            drawableX + (width / 2),
++            drawableY + (height / 2)
++        )
++        overlayDrawable.setPosition(
++            drawableX - (width / 2),
++            drawableY - (height / 2)
++        )
++        overlayDrawable.setOpacity(overlayOpacity())
++        return overlayDrawable
++    }
+ 
+-            // Get the minimum and maximum coordinates of the screen where the button can be placed.
+-            val min = windowSize.first
+-            val max = windowSize.second
+-
+-            // The X and Y coordinates of the InputOverlayDrawableButton on the InputOverlay.
+-            // These were set in the input overlay configuration menu.
+-            val drawableX = (position.first * max.x + min.x).toInt()
+-            val drawableY = (position.second * max.y + min.y).toInt()
+-            val width = overlayDrawable.width
+-            val height = overlayDrawable.height
+-
+-            // Now set the bounds for the InputOverlayDrawableButton.
+-            // This will dictate where on the screen (and the what the size) the InputOverlayDrawableButton will be.
+-            overlayDrawable.setBounds(
+-                drawableX - (width / 2),
+-                drawableY - (height / 2),
+-                drawableX + (width / 2),
+-                drawableY + (height / 2)
+-            )
++    private fun initializeOverlayDpad(
++        context: Context,
++        windowSize: Pair<Point, Point>,
++        defaultResId: Int,
++        pressedOneDirectionResId: Int,
++        pressedTwoDirectionsResId: Int,
++        position: Pair<Double, Double>
++    ): InputOverlayDrawableDpad {
++        val res = context.resources
++
++        val controlList: List<OverlayControlData> = if (staticPreviewMode) {
++            previewControlData ?: emptyList()
++        } else {
++            NativeConfig.getOverlayControlData().toList()
++        }
++        val dpadData = controlList.firstOrNull { it.id == OverlayControl.COMBINED_DPAD.id }
+ 
+-            // Need to set the image's position
+-            overlayDrawable.setPosition(
+-                drawableX - (width / 2),
+-                drawableY - (height / 2)
+-            )
+-            overlayDrawable.setOpacity(IntSetting.OVERLAY_OPACITY.getInt() * 255 / 100)
+-            return overlayDrawable
++        var scale = 0.25f
++        scale *= overlayScaleFactor()
++        if (dpadData != null) {
++            scale *= dpadData.individualScale.let { if (it > 0f) it else 1f }
+         }
+ 
+-        /**
+-         * Initializes an [InputOverlayDrawableDpad]
+-         *
+-         * @param context                   The current [Context].
+-         * @param windowSize                The size of the window to draw the overlay on.
+-         * @param defaultResId              The [Bitmap] resource ID of the default state.
+-         * @param pressedOneDirectionResId  The [Bitmap] resource ID of the pressed state in one direction.
+-         * @param pressedTwoDirectionsResId The [Bitmap] resource ID of the pressed state in two directions.
+-         * @param position                  The position on screen as represented by an x and y value between 0 and 1.
+-         * @return The initialized [InputOverlayDrawableDpad]
+-         */
+-        private fun initializeOverlayDpad(
+-            context: Context,
+-            windowSize: Pair<Point, Point>,
+-            defaultResId: Int,
+-            pressedOneDirectionResId: Int,
+-            pressedTwoDirectionsResId: Int,
+-            position: Pair<Double, Double>
+-        ): InputOverlayDrawableDpad {
+-            // Resources handle for fetching the initial Drawable resource.
+-            val res = context.resources
+-
+-            // Get the dpad control data for individual scale
+-            val overlayControlData = NativeConfig.getOverlayControlData()
+-            val dpadData = overlayControlData.firstOrNull { it.id == OverlayControl.COMBINED_DPAD.id }
+-
+-            // Decide scale based on button ID and user preference
+-            var scale = 0.25f
+-            scale *= (IntSetting.OVERLAY_SCALE.getInt() + 50).toFloat()
+-            scale /= 100f
+-
+-            // Apply individual scale
+-            if (dpadData != null) {
+-                scale *= dpadData.individualScale.let { if (it > 0f) it else 1f }
+-            }
++        val dpadId = OverlayControl.COMBINED_DPAD.id
++        val defaultStateBitmap = getBitmap(context, defaultResId, scale, dpadId)
++        val pressedOneDirectionStateBitmap =
++            getBitmap(context, pressedOneDirectionResId, scale, dpadId)
++        val pressedTwoDirectionsStateBitmap =
++            getBitmap(context, pressedTwoDirectionsResId, scale, dpadId)
++
++        val overlayDrawable = InputOverlayDrawableDpad(
++            res,
++            defaultStateBitmap,
++            pressedOneDirectionStateBitmap,
++            pressedTwoDirectionsStateBitmap
++        )
+ 
+-            // Initialize the InputOverlayDrawableDpad.
+-            val defaultStateBitmap =
+-                getBitmap(context, defaultResId, scale)
+-            val pressedOneDirectionStateBitmap = getBitmap(context, pressedOneDirectionResId, scale)
+-            val pressedTwoDirectionsStateBitmap =
+-                getBitmap(context, pressedTwoDirectionsResId, scale)
+-
+-            val overlayDrawable = InputOverlayDrawableDpad(
+-                res,
+-                defaultStateBitmap,
+-                pressedOneDirectionStateBitmap,
+-                pressedTwoDirectionsStateBitmap
+-            )
++        val min = windowSize.first
++        val max = windowSize.second
++        val drawableX = (position.first * max.x + min.x).toInt()
++        val drawableY = (position.second * max.y + min.y).toInt()
++        val width = overlayDrawable.width
++        val height = overlayDrawable.height
++
++        overlayDrawable.setBounds(
++            drawableX - (width / 2),
++            drawableY - (height / 2),
++            drawableX + (width / 2),
++            drawableY + (height / 2)
++        )
++        overlayDrawable.setPosition(drawableX - (width / 2), drawableY - (height / 2))
++        overlayDrawable.setOpacity(overlayOpacity())
++        return overlayDrawable
++    }
+ 
+-            // Get the minimum and maximum coordinates of the screen where the button can be placed.
+-            val min = windowSize.first
+-            val max = windowSize.second
+-
+-            // The X and Y coordinates of the InputOverlayDrawableDpad on the InputOverlay.
+-            // These were set in the input overlay configuration menu.
+-            val drawableX = (position.first * max.x + min.x).toInt()
+-            val drawableY = (position.second * max.y + min.y).toInt()
+-            val width = overlayDrawable.width
+-            val height = overlayDrawable.height
+-
+-            // Now set the bounds for the InputOverlayDrawableDpad.
+-            // This will dictate where on the screen (and the what the size) the InputOverlayDrawableDpad will be.
+-            overlayDrawable.setBounds(
+-                drawableX - (width / 2),
+-                drawableY - (height / 2),
+-                drawableX + (width / 2),
+-                drawableY + (height / 2)
+-            )
++    private fun initializeOverlayJoystick(
++        context: Context,
++        windowSize: Pair<Point, Point>,
++        resOuter: Int,
++        defaultResInner: Int,
++        pressedResInner: Int,
++        joystick: NativeAnalog,
++        button: NativeButton,
++        overlayControlData: OverlayControlData,
++        position: Pair<Double, Double>
++    ): InputOverlayDrawableJoystick {
++        val res = context.resources
++
++        var scale = 0.3f
++        scale *= overlayScaleFactor()
++        scale *= overlayControlData.individualScale.let { if (it > 0f) it else 1f }
++
++        val bitmapOuter = getBitmap(context, resOuter, scale, overlayControlData.id)
++        val bitmapInnerDefault = getBitmap(context, defaultResInner, 1.0f, overlayControlData.id)
++        val bitmapInnerPressed = getBitmap(context, pressedResInner, 1.0f, overlayControlData.id)
+ 
+-            // Need to set the image's position
+-            overlayDrawable.setPosition(drawableX - (width / 2), drawableY - (height / 2))
+-            overlayDrawable.setOpacity(IntSetting.OVERLAY_OPACITY.getInt() * 255 / 100)
+-            return overlayDrawable
+-        }
++        val min = windowSize.first
++        val max = windowSize.second
++        val drawableX = (position.first * max.x + min.x).toInt()
++        val drawableY = (position.second * max.y + min.y).toInt()
++        val outerScale = 1.66f
++
++        val outerSize = bitmapOuter.width
++        val outerRect = Rect(
++            drawableX - (outerSize / 2),
++            drawableY - (outerSize / 2),
++            drawableX + (outerSize / 2),
++            drawableY + (outerSize / 2)
++        )
++        val innerRect =
++            Rect(0, 0, (outerSize / outerScale).toInt(), (outerSize / outerScale).toInt())
++
++        val overlayDrawable = InputOverlayDrawableJoystick(
++            res,
++            bitmapOuter,
++            bitmapInnerDefault,
++            bitmapInnerPressed,
++            outerRect,
++            innerRect,
++            joystick,
++            button,
++            overlayControlData.id
++        )
+ 
+-        /**
+-         * Initializes an [InputOverlayDrawableJoystick]
+-         *
+-         * @param context         The current [Context]
+-         * @param windowSize      The size of the window to draw the overlay on.
+-         * @param resOuter        Resource ID for the outer image of the joystick (the static image that shows the circular bounds).
+-         * @param defaultResInner Resource ID for the default inner image of the joystick (the one you actually move around).
+-         * @param pressedResInner Resource ID for the pressed inner image of the joystick.
+-         * @param joystick        Identifier for which joystick this is.
+-         * @param buttonId          Identifier for which joystick button this is.
+-         * @param overlayControlData Identifier for determining where a button appears on screen.
+-         * @param position           The position on screen as represented by an x and y value between 0 and 1.
+-         * @return The initialized [InputOverlayDrawableJoystick].
+-         */
+-        private fun initializeOverlayJoystick(
+-            context: Context,
+-            windowSize: Pair<Point, Point>,
+-            resOuter: Int,
+-            defaultResInner: Int,
+-            pressedResInner: Int,
+-            joystick: NativeAnalog,
+-            button: NativeButton,
+-            overlayControlData: OverlayControlData,
+-            position: Pair<Double, Double>
+-        ): InputOverlayDrawableJoystick {
+-            // Resources handle for fetching the initial Drawable resource.
+-            val res = context.resources
+-
+-            // Decide scale based on user preference
+-            var scale = 0.3f
+-            scale *= (IntSetting.OVERLAY_SCALE.getInt() + 50).toFloat()
+-            scale /= 100f
+-
+-            // Apply individual scale
+-            scale *= overlayControlData.individualScale.let { if (it > 0f) it else 1f }
+-
+-            // Initialize the InputOverlayDrawableJoystick.
+-            val bitmapOuter = getBitmap(context, resOuter, scale)
+-            val bitmapInnerDefault = getBitmap(context, defaultResInner, 1.0f)
+-            val bitmapInnerPressed = getBitmap(context, pressedResInner, 1.0f)
+-
+-            // Get the minimum and maximum coordinates of the screen where the button can be placed.
+-            val min = windowSize.first
+-            val max = windowSize.second
+-
+-            // The X and Y coordinates of the InputOverlayDrawableButton on the InputOverlay.
+-            // These were set in the input overlay configuration menu.
+-            val drawableX = (position.first * max.x + min.x).toInt()
+-            val drawableY = (position.second * max.y + min.y).toInt()
+-            val outerScale = 1.66f
+-
+-            // Now set the bounds for the InputOverlayDrawableJoystick.
+-            // This will dictate where on the screen (and the what the size) the InputOverlayDrawableJoystick will be.
+-            val outerSize = bitmapOuter.width
+-            val outerRect = Rect(
+-                drawableX - (outerSize / 2),
+-                drawableY - (outerSize / 2),
+-                drawableX + (outerSize / 2),
+-                drawableY + (outerSize / 2)
+-            )
+-            val innerRect =
+-                Rect(0, 0, (outerSize / outerScale).toInt(), (outerSize / outerScale).toInt())
+-
+-            // Send the drawableId to the joystick so it can be referenced when saving control position.
+-            val overlayDrawable = InputOverlayDrawableJoystick(
+-                res,
+-                bitmapOuter,
+-                bitmapInnerDefault,
+-                bitmapInnerPressed,
+-                outerRect,
+-                innerRect,
+-                joystick,
+-                button,
+-                overlayControlData.id
+-            )
++        overlayDrawable.setPosition(drawableX, drawableY)
++        overlayDrawable.setOpacity(overlayOpacity())
++        return overlayDrawable
++    }
+ 
+-            // Need to set the image's position
+-            overlayDrawable.setPosition(drawableX, drawableY)
+-            overlayDrawable.setOpacity(IntSetting.OVERLAY_OPACITY.getInt() * 255 / 100)
+-            return overlayDrawable
+-        }
++    companion object {
++
++        // Increase this number every time there is a breaking change to every overlay layout
++        const val OVERLAY_VERSION = 1
++
++        // Increase the corresponding layout version number whenever that layout has a breaking change
++        private const val LANDSCAPE_OVERLAY_VERSION = 1
++        private const val PORTRAIT_OVERLAY_VERSION = 1
++        private const val FOLDABLE_OVERLAY_VERSION = 1
++        val overlayLayoutVersions = listOf(
++            LANDSCAPE_OVERLAY_VERSION,
++            PORTRAIT_OVERLAY_VERSION,
++            FOLDABLE_OVERLAY_VERSION
++        )
+     }
+ }
+diff --git a/src/android/app/src/main/java/org/yuzu/yuzu_emu/overlay/OverlayColorActivity.kt b/src/android/app/src/main/java/org/yuzu/yuzu_emu/overlay/OverlayColorActivity.kt
+new file mode 100644
+--- /dev/null
++++ b/src/android/app/src/main/java/org/yuzu/yuzu_emu/overlay/OverlayColorActivity.kt
+@@ -0,0 +1,918 @@
++// SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
++// SPDX-License-Identifier: GPL-3.0-or-later
++
++package org.yuzu.yuzu_emu.overlay
++
++import android.app.Activity
++import android.content.Context
++import android.content.Intent
++import android.graphics.Color
++import android.graphics.drawable.GradientDrawable
++import android.net.Uri
++import android.content.res.Configuration
++import android.os.Bundle
++import android.text.Editable
++import android.text.InputType
++import android.text.TextWatcher
++import android.view.LayoutInflater
++import android.view.View
++import android.view.ViewGroup
++import android.view.inputmethod.InputMethodManager
++import android.widget.Toast
++import androidx.activity.OnBackPressedCallback
++import androidx.activity.result.contract.ActivityResultContracts
++import androidx.appcompat.app.AppCompatActivity
++import androidx.core.view.ViewCompat
++import androidx.core.view.WindowInsetsCompat
++import androidx.core.view.updatePadding
++import androidx.lifecycle.lifecycleScope
++import androidx.recyclerview.widget.GridLayoutManager
++import androidx.recyclerview.widget.LinearLayoutManager
++import androidx.recyclerview.widget.RecyclerView
++import kotlinx.coroutines.launch
++import kotlinx.coroutines.yield
++import com.google.android.material.dialog.MaterialAlertDialogBuilder
++import com.google.android.material.slider.Slider
++import com.google.android.material.snackbar.Snackbar
++import java.util.Locale
++import org.yuzu.yuzu_emu.R
++import org.yuzu.yuzu_emu.YuzuApplication
++import org.yuzu.yuzu_emu.databinding.ActivityOverlayColorBinding
++import org.yuzu.yuzu_emu.databinding.DialogEditTextBinding
++import org.yuzu.yuzu_emu.databinding.ListItemOverlayPresetBinding
++import org.yuzu.yuzu_emu.databinding.ListItemSettingBinding
++import org.yuzu.yuzu_emu.databinding.ListItemSettingsHeaderBinding
++import org.yuzu.yuzu_emu.utils.ThemeHelper
++import org.yuzu.yuzu_emu.utils.ViewUtils.setVisible
++import org.yuzu.yuzu_emu.utils.ViewUtils.updateMargins
++
++class OverlayColorActivity : AppCompatActivity() {
++    private lateinit var binding: ActivityOverlayColorBinding
++    private val overrides = linkedMapOf<String, Int>()
++    private val adapter = ColorAdapter()
++
++    private var body = OverlayColors.DEFAULT_COLOR
++    private var face = OverlayColors.FACE_LETTERS
++    private var destination = Destination.HUB
++    private var editingId: String? = null
++    private var suppress = false
++    private var savedPresets = emptyList<OverlayPresetLibrary.Preset>()
++    private lateinit var colorConfigTransfer: OverlayColorConfigTransfer
++    private var lastPreviewLayoutSignature: String? = null
++    /** Opened from settings straight to template/presets; back leaves the activity instead of the hub. */
++    private var entrySkipsHub = false
++    /** Ignores stale [View.post] grid relayout callbacks after leaving the presets screen. */
++    private var listLayoutGeneration = 0
++    private var presetGridLayoutRunnable: Runnable? = null
++
++    private enum class Destination {
++        HUB,
++        PRESETS,
++        TEMPLATE
++    }
++
++    private val importLauncher = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
++        if (uri != null) {
++            colorConfigTransfer.handleImportUri(uri)
++        }
++    }
++
++    private val exportLauncher = registerForActivityResult(
++        ActivityResultContracts.CreateDocument(OverlayPresetLibrary.EXPORT_MIME_TYPE)
++    ) { uri ->
++        if (uri != null) {
++            colorConfigTransfer.handleExportUri(uri)
++        }
++    }
++
++    override fun attachBaseContext(base: Context) {
++        super.attachBaseContext(YuzuApplication.applyLanguage(base))
++    }
++
++    override fun onResume() {
++        super.onResume()
++        val layoutSignature = OverlayPreviewLayout.layoutSignature()
++        if (lastPreviewLayoutSignature != null && lastPreviewLayoutSignature != layoutSignature) {
++            OverlayPresetThumbnailCache.evictAll()
++            if (destination == Destination.PRESETS) {
++                showPresets()
++            }
++        }
++        lastPreviewLayoutSignature = layoutSignature
++    }
++
++    override fun onCreate(savedInstanceState: Bundle?) {
++        ThemeHelper.setTheme(this)
++        super.onCreate(savedInstanceState)
++        binding = ActivityOverlayColorBinding.inflate(layoutInflater)
++        setContentView(binding.root)
++
++        body = OverlayColors.loadBody()
++        overrides.clear()
++        overrides.putAll(OverlayColors.loadOverrides())
++        face = OverlayColors.loadFace()
++        savedPresets = OverlayPresetLibrary.load()
++
++        if (savedInstanceState != null) {
++            body = savedInstanceState.getInt(STATE_BODY) or 0xFF000000.toInt()
++            overrides.clear()
++            overrides.putAll(OverlayColors.parse(savedInstanceState.getString(STATE_MAP).orEmpty()))
++            face = savedInstanceState.getString(STATE_FACE) ?: OverlayColors.FACE_LETTERS
++            editingId = savedInstanceState.getString(STATE_EDITING)
++            destination = Destination.entries[savedInstanceState.getInt(STATE_DESTINATION)]
++            entrySkipsHub = savedInstanceState.getBoolean(STATE_ENTRY_SKIPS_HUB)
++        } else {
++            val destOrdinal = intent.getIntExtra(EXTRA_DESTINATION, Destination.HUB.ordinal)
++            destination = Destination.entries.getOrElse(destOrdinal) { Destination.HUB }
++            entrySkipsHub = destination != Destination.HUB
++        }
++
++        binding.toolbarOverlayColor.setNavigationOnClickListener { onNavigateBack() }
++
++        colorConfigTransfer = OverlayColorConfigTransfer(
++            this,
++            binding.overlayColorRoot,
++            onImportApplied = { reloadColorsFromStorage() }
++        )
++
++        onBackPressedDispatcher.addCallback(
++            this,
++            object : OnBackPressedCallback(true) {
++                override fun handleOnBackPressed() {
++                    onNavigateBack()
++                }
++            }
++        )
++
++        binding.listOverlayColor.layoutManager = LinearLayoutManager(this)
++        binding.listOverlayColor.adapter = adapter
++        binding.listOverlayColor.setHasFixedSize(true)
++        binding.listOverlayColor.itemAnimator = null
++        binding.listOverlayColor.setItemViewCacheSize(20)
++        binding.colorPreview.setImageDrawable(null)
++        wireEditor()
++        applyInsets()
++        if (editingId != null) {
++            showEditor(editingId!!)
++        } else {
++            navigateTo(destination)
++        }
++    }
++
++    override fun onSaveInstanceState(outState: Bundle) {
++        super.onSaveInstanceState(outState)
++        outState.putInt(STATE_BODY, body)
++        outState.putString(STATE_MAP, OverlayColors.serialize(overrides, face))
++        outState.putString(STATE_FACE, face)
++        outState.putString(STATE_EDITING, editingId)
++        outState.putInt(STATE_DESTINATION, destination.ordinal)
++        outState.putBoolean(STATE_ENTRY_SKIPS_HUB, entrySkipsHub)
++    }
++
++    private fun applyInsets() {
++        ViewCompat.setOnApplyWindowInsetsListener(binding.overlayColorRoot) { _, windowInsets ->
++            val bars = windowInsets.getInsets(WindowInsetsCompat.Type.systemBars())
++            val cutout = windowInsets.getInsets(WindowInsetsCompat.Type.displayCutout())
++            val left = bars.left + cutout.left
++            val right = bars.right + cutout.right
++            binding.listOverlayColor.updateMargins(left = left, right = right)
++            binding.listOverlayColor.updatePadding(bottom = bars.bottom)
++            binding.editorScroll.updateMargins(left = left, right = right)
++            binding.editorScroll.updatePadding(bottom = bars.bottom)
++            binding.appbarOverlayColor.updateMargins(left = left, right = right)
++            windowInsets
++        }
++    }
++
++    /** Persist like other settings screens: changes apply immediately. */
++    private fun commitColors(
++        showFeedback: Boolean = false,
++        feedbackRes: Int? = null,
++        feedbackFormatArgs: Array<out Any> = emptyArray()
++    ) {
++        OverlayColors.write(body, overrides, face)
++        setResult(Activity.RESULT_OK)
++        if (showFeedback && feedbackRes != null) {
++            val message = if (feedbackFormatArgs.isEmpty()) {
++                getString(feedbackRes)
++            } else {
++                getString(feedbackRes, *feedbackFormatArgs)
++            }
++            Snackbar.make(binding.overlayColorRoot, message, Snackbar.LENGTH_SHORT).show()
++        }
++    }
++
++    private fun navigateTo(target: Destination) {
++        destination = target
++        when (target) {
++            Destination.HUB -> showHub()
++            Destination.PRESETS -> showPresets()
++            Destination.TEMPLATE -> showTemplate()
++        }
++    }
++
++    private fun showListScreen(titleRes: Int, rows: List<Row>) {
++        dismissColorEditorIme()
++        editingId = null
++        val layoutGeneration = ++listLayoutGeneration
++        cancelPendingPresetGridLayout()
++        binding.editorScroll.visibility = View.GONE
++        binding.listOverlayColor.visibility = View.VISIBLE
++        binding.toolbarOverlayColor.setTitle(titleRes)
++        configureListLayout(rows)
++        adapter.submit(rows)
++        if (destination == Destination.PRESETS && rows.any { it is Row.PresetDesign }) {
++            preloadPresetThumbnails(rows)
++            val runnable = Runnable {
++                presetGridLayoutRunnable = null
++                if (layoutGeneration != listLayoutGeneration) {
++                    return@Runnable
++                }
++                if (destination != Destination.PRESETS) {
++                    return@Runnable
++                }
++                val currentRows = adapter.currentRows()
++                refreshPresetGridLayout(currentRows)
++            }
++            presetGridLayoutRunnable = runnable
++            binding.listOverlayColor.post(runnable)
++        }
++    }
++
++    private fun cancelPendingPresetGridLayout() {
++        presetGridLayoutRunnable?.let { binding.listOverlayColor.removeCallbacks(it) }
++        presetGridLayoutRunnable = null
++    }
++
++    private fun effectivePresetListWidthPx(): Int {
++        val listWidth = binding.listOverlayColor.width
++        if (listWidth > 0) {
++            return listWidth
++        }
++        return resources.displayMetrics.widthPixels
++    }
++
++    private fun presetColumnCount(): Int {
++        if (resources.configuration.orientation != Configuration.ORIENTATION_LANDSCAPE) {
++            return 1
++        }
++        val minColumnPx = resources.getDimensionPixelSize(R.dimen.overlay_preset_grid_min_column_width)
++        val widthPx = effectivePresetListWidthPx()
++        return if (widthPx >= minColumnPx * 2) 2 else 1
++    }
++
++    private fun refreshPresetGridLayout(rows: List<Row>) {
++        if (destination != Destination.PRESETS || !rows.any { it is Row.PresetDesign }) {
++            return
++        }
++        val beforeColumns = adapter.presetGridColumns
++        val beforeGrid = binding.listOverlayColor.layoutManager is GridLayoutManager
++        configureListLayout(rows)
++        val afterGrid = binding.listOverlayColor.layoutManager is GridLayoutManager
++        if (beforeColumns != adapter.presetGridColumns || beforeGrid != afterGrid) {
++            adapter.notifyDataSetChanged()
++        }
++    }
++
++    private fun configureListLayout(rows: List<Row>) {
++        val presetGrid = destination == Destination.PRESETS && rows.any { it is Row.PresetDesign }
++        if (!presetGrid) {
++            adapter.presetGridColumns = 0
++            binding.listOverlayColor.layoutManager =
++                LinearLayoutManager(this, LinearLayoutManager.VERTICAL, false)
++            adapter.spanSizeLookup.invalidateSpanIndexCache()
++            return
++        }
++        val columns = presetColumnCount()
++        adapter.presetGridColumns = columns
++        if (columns == 1) {
++            binding.listOverlayColor.layoutManager =
++                LinearLayoutManager(this, LinearLayoutManager.VERTICAL, false)
++            adapter.spanSizeLookup.invalidateSpanIndexCache()
++            return
++        }
++        val existing = binding.listOverlayColor.layoutManager
++        if (existing is GridLayoutManager && existing.spanCount == columns) {
++            existing.spanSizeLookup = adapter.spanSizeLookup
++            adapter.spanSizeLookup.invalidateSpanIndexCache()
++            return
++        }
++        val grid = GridLayoutManager(this, columns)
++        grid.spanSizeLookup = adapter.spanSizeLookup
++        binding.listOverlayColor.layoutManager = grid
++        adapter.spanSizeLookup.invalidateSpanIndexCache()
++    }
++
++    private fun preloadPresetThumbnails(rows: List<Row>) {
++        lifecycleScope.launch {
++            for (row in rows) {
++                if (row is Row.PresetDesign) {
++                    OverlayPresetThumbnailCache.preload(
++                        this@OverlayColorActivity,
++                        row.body,
++                        row.face,
++                        row.controlOverrides
++                    )
++                    yield()
++                }
++            }
++        }
++    }
++
++    private fun builtInLabels(): List<String> =
++        OverlayColors.palettes.map { getString(it.labelRes) }
++
++    private fun reservedNameKeys(): Set<String> =
++        OverlayColors.reservedPresetNameKeys(builtInLabels())
++
++    private fun showHub() {
++        destination = Destination.HUB
++        showListScreen(
++            R.string.overlay_color,
++            listOf(
++                Row.Setting(
++                    title = getString(R.string.overlay_color_presets),
++                    description = getString(R.string.overlay_color_presets_summary),
++                    showChevron = true,
++                    onClick = { navigateTo(Destination.PRESETS) }
++                ),
++                Row.Setting(
++                    title = getString(R.string.overlay_color_create_template),
++                    description = getString(R.string.overlay_color_create_template_summary),
++                    showChevron = true,
++                    onClick = { navigateTo(Destination.TEMPLATE) }
++                )
++            )
++        )
++    }
++
++    private fun showPresets() {
++        destination = Destination.PRESETS
++        savedPresets = OverlayPresetLibrary.load()
++        val rows = mutableListOf<Row>()
++        rows += Row.Header(R.string.overlay_color_builtin_header)
++        OverlayColors.palettes.forEach { palette ->
++            val title = getString(palette.labelRes)
++            rows += Row.PresetDesign(
++                title = title,
++                body = palette.body,
++                face = palette.face,
++                controlOverrides = palette.overrides,
++                onClick = {
++                    applyPalette(
++                        palette.body,
++                        palette.overrides,
++                        palette.face,
++                        getString(palette.labelRes)
++                    )
++                }
++            )
++        }
++        val savedRows = savedPresets.filter { preset ->
++            OverlayColors.matchingPalette(preset.body, preset.overrides, preset.face) == null
++        }
++        if (savedRows.isNotEmpty()) {
++            rows += Row.Header(R.string.overlay_preset_saved_header)
++            savedRows.forEach { preset ->
++                rows += Row.PresetDesign(
++                    title = preset.name,
++                    body = preset.body,
++                    face = preset.face,
++                    controlOverrides = preset.overrides,
++                    onClick = {
++                        applyPalette(preset.body, preset.overrides, preset.face, preset.name)
++                    },
++                    onLongClick = { confirmDelete(preset.name) }
++                )
++            }
++        }
++        showListScreen(R.string.overlay_color_presets, rows)
++    }
++
++    private fun showTemplate() {
++        destination = Destination.TEMPLATE
++        val rows = mutableListOf<Row>()
++        rows += Row.Setting(
++            title = getString(R.string.overlay_preset_save),
++            description = getString(R.string.overlay_color_save_preset_hint),
++            showChevron = true,
++            onClick = { promptSavePreset() }
++        )
++        rows += Row.Header(R.string.overlay_color_buttons)
++        rows += controlRow(OverlayColors.BASE, R.string.overlay_color_base, body, usingBaseColor = false)
++        OverlayColors.targets.forEach { target ->
++            val custom = overrides.containsKey(target.id)
++            val color = OverlayColors.resolved(body, overrides, target.id)
++            rows += controlRow(target.id, OverlayColors.labelFor(target.id, face), color, !custom)
++        }
++        showListScreen(R.string.overlay_color_create_template, rows)
++    }
++
++    private fun showEditor(id: String) {
++        editingId = id
++        binding.listOverlayColor.visibility = View.GONE
++        binding.editorScroll.visibility = View.VISIBLE
++        binding.toolbarOverlayColor.setTitle(
++            if (id == OverlayColors.BASE) {
++                R.string.overlay_color_base
++            } else {
++                OverlayColors.labelFor(id, face)
++            }
++        )
++        renderEditor(pushSliders = true, updateHex = true)
++    }
++
++    private fun controlRow(id: String, labelRes: Int, color: Int, usingBaseColor: Boolean): Row.Control {
++        val subtitle = if (id == OverlayColors.BASE) {
++            OverlayColors.hexString(color)
++        } else if (usingBaseColor) {
++            getString(R.string.overlay_color_using_base)
++        } else {
++            OverlayColors.hexString(color)
++        }
++        return Row.Control(
++            controlId = id,
++            title = getString(labelRes),
++            subtitle = subtitle,
++            color = color,
++            onClick = { showEditor(id) }
++        )
++    }
++
++    private fun applyPalette(
++        newBody: Int,
++        newOverrides: Map<String, Int>,
++        newFace: String,
++        appliedName: String
++    ) {
++        body = newBody or 0xFF000000.toInt()
++        face = newFace
++        overrides.clear()
++        overrides.putAll(newOverrides)
++        commitColors(
++            showFeedback = true,
++            feedbackRes = R.string.overlay_preset_applied,
++            feedbackFormatArgs = arrayOf(appliedName)
++        )
++    }
++
++    private fun wireEditor() {
++        val sliderListener = Slider.OnChangeListener { _, _, fromUser ->
++            if (suppress || !fromUser) {
++                return@OnChangeListener
++            }
++            assign(
++                Color.rgb(
++                    binding.redSlider.value.toInt(),
++                    binding.greenSlider.value.toInt(),
++                    binding.blueSlider.value.toInt()
++                ),
++                pushSliders = false,
++                updateHex = true,
++                commit = false
++            )
++        }
++        binding.redSlider.addOnChangeListener(sliderListener)
++        binding.greenSlider.addOnChangeListener(sliderListener)
++        binding.blueSlider.addOnChangeListener(sliderListener)
++
++        val touchListener = object : Slider.OnSliderTouchListener {
++            override fun onStartTrackingTouch(slider: Slider) {}
++            override fun onStopTrackingTouch(slider: Slider) {
++                commitColors()
++            }
++        }
++        binding.redSlider.addOnSliderTouchListener(touchListener)
++        binding.greenSlider.addOnSliderTouchListener(touchListener)
++        binding.blueSlider.addOnSliderTouchListener(touchListener)
++
++        binding.hexInput.addTextChangedListener(object : TextWatcher {
++            override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
++            override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {}
++            override fun afterTextChanged(s: Editable?) {
++                if (suppress) {
++                    return
++                }
++                val text = s?.toString()?.trim().orEmpty()
++                val parsed = text.toIntOrNull(16)
++                if (parsed == null || text.length != 6) {
++                    return
++                }
++                assign(parsed or 0xFF000000.toInt(), pushSliders = true, updateHex = false, commit = true)
++            }
++        })
++        binding.matchBaseColorButton.setOnClickListener {
++            val id = editingId ?: return@setOnClickListener
++            if (id == OverlayColors.BASE) {
++                return@setOnClickListener
++            }
++            overrides.remove(id)
++            renderEditor(pushSliders = true, updateHex = true)
++            commitColors()
++        }
++    }
++
++    private fun assign(color: Int, pushSliders: Boolean, updateHex: Boolean, commit: Boolean) {
++        val id = editingId ?: return
++        val opaque = color or 0xFF000000.toInt()
++        if (id == OverlayColors.BASE) {
++            body = opaque
++        } else {
++            overrides[id] = opaque
++        }
++        renderEditor(pushSliders, updateHex)
++        if (commit) {
++            commitColors()
++        }
++    }
++
++    private fun currentColor(): Int {
++        val id = editingId ?: return body
++        return if (id == OverlayColors.BASE) body else OverlayColors.resolved(body, overrides, id)
++    }
++
++    private fun renderEditor(pushSliders: Boolean, updateHex: Boolean) {
++        val id = editingId ?: return
++        val color = currentColor()
++        val editingBaseColor = id == OverlayColors.BASE
++        binding.matchBaseColorButton.visibility =
++            if (editingBaseColor || !overrides.containsKey(id)) View.GONE else View.VISIBLE
++        if (editingBaseColor) {
++            binding.colorPreview.visibility = View.GONE
++            binding.colorPreview.setImageDrawable(null)
++            binding.colorPreviewBar.visibility = View.VISIBLE
++            binding.colorPreviewBar.setImageDrawable(
++                OverlayControlIcons.tintedBaseColorEditorPreview(this, color)
++            )
++        } else {
++            binding.colorPreviewBar.visibility = View.GONE
++            binding.colorPreviewBar.setImageDrawable(null)
++            binding.colorPreview.visibility = View.VISIBLE
++            binding.colorPreview.setImageDrawable(
++                OverlayControlIcons.tintedIcon(
++                    this,
++                    id,
++                    body,
++                    face,
++                    overrides,
++                    OverlayControlIcons.EDITOR_PREVIEW_ICON_DP
++                )
++            )
++        }
++        binding.redLabel.text = getString(R.string.red) + "  " + Color.red(color)
++        binding.greenLabel.text = getString(R.string.green) + "  " + Color.green(color)
++        binding.blueLabel.text = getString(R.string.blue) + "  " + Color.blue(color)
++        if (pushSliders) {
++            suppress = true
++            binding.redSlider.value = Color.red(color).toFloat()
++            binding.greenSlider.value = Color.green(color).toFloat()
++            binding.blueSlider.value = Color.blue(color).toFloat()
++            suppress = false
++        }
++        if (updateHex && !binding.hexInput.hasFocus()) {
++            suppress = true
++            binding.hexInput.setText(String.format(Locale.US, "%06X", color and 0xFFFFFF))
++            suppress = false
++        }
++    }
++
++    private fun promptSavePreset() {
++        val editor = DialogEditTextBinding.inflate(layoutInflater)
++        editor.editText.inputType = InputType.TYPE_CLASS_TEXT
++        editor.editText.hint = getString(R.string.overlay_preset_name)
++        MaterialAlertDialogBuilder(this)
++            .setTitle(R.string.overlay_preset_save)
++            .setView(editor.root)
++            .setNegativeButton(android.R.string.cancel, null)
++            .setPositiveButton(android.R.string.ok) { _, _ ->
++                val name = editor.editText.text?.toString()?.trim().orEmpty()
++                if (!isPresetNameValid(name)) {
++                    Toast.makeText(this, R.string.invalid_profile_name, Toast.LENGTH_SHORT).show()
++                    return@setPositiveButton
++                }
++                val builtin = OverlayColors.matchingPalette(body, overrides, face)
++                if (builtin != null) {
++                    Toast.makeText(
++                        this,
++                        getString(R.string.overlay_preset_same_as_builtin, getString(builtin.labelRes)),
++                        Toast.LENGTH_LONG
++                    ).show()
++                    return@setPositiveButton
++                }
++                if (OverlayPresetLibrary.isReservedName(name, reservedNameKeys())) {
++                    Toast.makeText(this, R.string.overlay_preset_name_taken, Toast.LENGTH_LONG).show()
++                    return@setPositiveButton
++                }
++                confirmOverwriteSavedPresetIfNeeded(name) {
++                    savedPresets = OverlayPresetLibrary.save(name, body, face, overrides)
++                    commitColors()
++                    Snackbar.make(
++                        binding.overlayColorRoot,
++                        getString(R.string.overlay_preset_saved, name),
++                        Snackbar.LENGTH_SHORT
++                    ).show()
++                    if (editingId == null) {
++                        showTemplate()
++                    }
++                }
++            }
++            .show()
++    }
++
++    private fun confirmOverwriteSavedPresetIfNeeded(name: String, onSave: () -> Unit) {
++        if (OverlayPresetLibrary.findSavedByExactName(name) == null) {
++            onSave()
++            return
++        }
++        MaterialAlertDialogBuilder(this)
++            .setTitle(R.string.overlay_preset_overwrite)
++            .setMessage(getString(R.string.overlay_preset_overwrite_message, name))
++            .setNegativeButton(android.R.string.cancel, null)
++            .setPositiveButton(R.string.overlay_preset_overwrite_confirm) { _, _ -> onSave() }
++            .show()
++    }
++
++    private fun isPresetNameValid(name: String): Boolean {
++        if (name.isEmpty() || name.length > 40) {
++            return false
++        }
++        return name.none { it == '/' || it == '\\' || it == '\n' || it == '\r' }
++    }
++
++    private fun confirmDelete(name: String) {
++        MaterialAlertDialogBuilder(this)
++            .setTitle(R.string.overlay_preset_delete)
++            .setMessage(getString(R.string.overlay_preset_delete_message, name))
++            .setNegativeButton(android.R.string.cancel, null)
++            .setPositiveButton(R.string.delete) { _, _ ->
++                savedPresets = OverlayPresetLibrary.delete(name)
++                showPresets()
++            }
++            .show()
++    }
++
++    private fun reloadColorsFromStorage() {
++        body = OverlayColors.loadBody()
++        overrides.clear()
++        overrides.putAll(OverlayColors.loadOverrides())
++        face = OverlayColors.loadFace()
++        savedPresets = OverlayPresetLibrary.load()
++        OverlayPresetThumbnailCache.evictAll()
++        if (editingId != null) {
++            showEditor(editingId!!)
++            return
++        }
++        when (destination) {
++            Destination.PRESETS -> showPresets()
++            Destination.TEMPLATE -> showTemplate()
++            Destination.HUB -> { /* unchanged */ }
++        }
++    }
++
++    private fun dismissColorEditorIme() {
++        binding.hexInput.clearFocus()
++        binding.overlayColorRoot.requestFocus()
++        val imm = getSystemService(InputMethodManager::class.java)
++        imm?.hideSoftInputFromWindow(binding.overlayColorRoot.windowToken, 0)
++    }
++
++    private fun onNavigateBack() {
++        dismissColorEditorIme()
++        if (editingId != null) {
++            showTemplate()
++            return
++        }
++        when (destination) {
++            Destination.PRESETS, Destination.TEMPLATE -> {
++                if (entrySkipsHub) {
++                    finish()
++                } else {
++                    showHub()
++                }
++            }
++            Destination.HUB -> finish()
++        }
++    }
++
++    private sealed class Row {
++        data class Header(val titleRes: Int) : Row()
++        data class PresetDesign(
++            val title: String,
++            val body: Int,
++            val face: String,
++            val controlOverrides: Map<String, Int>,
++            val onClick: () -> Unit,
++            val onLongClick: (() -> Unit)? = null
++        ) : Row()
++        data class Setting(
++            val title: String,
++            val description: String,
++            val swatch: GradientDrawable? = null,
++            val showChevron: Boolean = false,
++            val onClick: () -> Unit,
++            val onLongClick: (() -> Unit)? = null
++        ) : Row()
++        data class Control(
++            val controlId: String,
++            val title: String,
++            val subtitle: String,
++            val color: Int,
++            val onClick: () -> Unit
++        ) : Row()
++    }
++
++    private inner class ColorAdapter : RecyclerView.Adapter<RecyclerView.ViewHolder>() {
++        private val rows = mutableListOf<Row>()
++        /** 0 = hub/template (linear); 1–2 = presets grid width in landscape. */
++        var presetGridColumns = 0
++
++        val spanSizeLookup = object : GridLayoutManager.SpanSizeLookup() {
++            override fun getSpanSize(position: Int): Int {
++                val row = rows.getOrNull(position)
++                if (presetGridColumns > 1) {
++                    return when (row) {
++                        is Row.PresetDesign -> 1
++                        else -> presetGridColumns
++                    }
++                }
++                return when (row) {
++                    is Row.PresetDesign -> 1
++                    else -> {
++                        val grid = binding.listOverlayColor.layoutManager as? GridLayoutManager
++                        grid?.spanCount ?: 1
++                    }
++                }
++            }
++        }
++
++        fun currentRows(): List<Row> = rows.toList()
++
++        fun submit(next: List<Row>) {
++            rows.clear()
++            rows.addAll(next)
++            notifyDataSetChanged()
++        }
++
++        override fun getItemViewType(position: Int): Int = when (rows[position]) {
++            is Row.Header -> 0
++            is Row.PresetDesign -> 1
++            is Row.Setting -> 2
++            is Row.Control -> 3
++        }
++
++        override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): RecyclerView.ViewHolder {
++            val inflater = LayoutInflater.from(parent.context)
++            return when (viewType) {
++                0 -> HeaderHolder(ListItemSettingsHeaderBinding.inflate(inflater, parent, false))
++                1 -> PresetDesignHolder(ListItemOverlayPresetBinding.inflate(inflater, parent, false))
++                2 -> SettingHolder(ListItemSettingBinding.inflate(inflater, parent, false))
++                else -> ControlHolder(ListItemSettingBinding.inflate(inflater, parent, false))
++            }
++        }
++
++        override fun onBindViewHolder(holder: RecyclerView.ViewHolder, position: Int) {
++            when (val row = rows[position]) {
++                is Row.Header -> (holder as HeaderHolder).bind(row)
++                is Row.PresetDesign -> (holder as PresetDesignHolder).bind(row)
++                is Row.Setting -> (holder as SettingHolder).bind(row)
++                is Row.Control -> (holder as ControlHolder).bind(row)
++            }
++        }
++
++        override fun getItemCount(): Int = rows.size
++    }
++
++    private class HeaderHolder(
++        private val binding: ListItemSettingsHeaderBinding
++    ) : RecyclerView.ViewHolder(binding.root) {
++        fun bind(row: Row.Header) {
++            binding.textHeaderName.setText(row.titleRes)
++        }
++    }
++
++    private inner class PresetDesignHolder(
++        private val binding: ListItemOverlayPresetBinding
++    ) : RecyclerView.ViewHolder(binding.root) {
++        fun bind(row: Row.PresetDesign) {
++            binding.presetTitle.text = row.title
++            binding.presetPreview.setPreset(row.body, row.face, row.controlOverrides)
++            val apply = { row.onClick() }
++            binding.root.setOnClickListener { apply() }
++            binding.presetPreview.setOnClickListener { apply() }
++            binding.root.setOnLongClickListener {
++                row.onLongClick?.invoke()
++                row.onLongClick != null
++            }
++            binding.presetPreview.setOnLongClickListener {
++                row.onLongClick?.invoke()
++                row.onLongClick != null
++            }
++        }
++    }
++
++    private inner class SettingHolder(
++        private val binding: ListItemSettingBinding
++    ) : RecyclerView.ViewHolder(binding.root) {
++        fun bind(row: Row.Setting) {
++            binding.textSettingName.text = row.title
++            binding.textSettingDescription.text = row.description
++            binding.textSettingDescription.setVisible(row.description.isNotEmpty())
++            if (row.showChevron) {
++                binding.textSettingValue.setVisible(true)
++                binding.textSettingValue.text = ""
++                binding.textSettingValue.setCompoundDrawablesRelativeWithIntrinsicBounds(
++                    0,
++                    0,
++                    R.drawable.ic_arrow_forward,
++                    0
++                )
++            } else {
++                binding.textSettingValue.setVisible(false)
++                binding.textSettingValue.setCompoundDrawablesRelativeWithIntrinsicBounds(0, 0, 0, 0)
++            }
++            binding.buttonClear.setVisible(false)
++            if (row.swatch != null) {
++                binding.icon.setVisible(true)
++                binding.icon.background = row.swatch
++            } else {
++                binding.icon.setVisible(false)
++            }
++            binding.root.setOnClickListener { row.onClick() }
++            binding.root.setOnLongClickListener {
++                row.onLongClick?.invoke()
++                row.onLongClick != null
++            }
++        }
++    }
++
++    private inner class ControlHolder(
++        private val binding: ListItemSettingBinding
++    ) : RecyclerView.ViewHolder(binding.root) {
++        fun bind(row: Row.Control) {
++            binding.textSettingName.text = row.title
++            binding.textSettingDescription.text = row.subtitle
++            binding.textSettingDescription.setVisible(true)
++            binding.textSettingValue.setVisible(true)
++            binding.textSettingValue.text = ""
++            binding.textSettingValue.setCompoundDrawablesRelativeWithIntrinsicBounds(
++                0,
++                0,
++                R.drawable.ic_arrow_forward,
++                0
++            )
++            binding.buttonClear.setVisible(false)
++            binding.icon.setVisible(true)
++            binding.icon.imageTintList = null
++            val tinted = OverlayControlIcons.tintedIcon(
++                binding.root.context,
++                row.controlId,
++                body,
++                face,
++                overrides,
++                OverlayControlIcons.DESIGN_PREVIEW_ICON_DP
++            )
++            if (tinted != null) {
++                binding.icon.background = null
++                binding.icon.setImageDrawable(tinted)
++            } else {
++                binding.icon.setImageDrawable(null)
++                binding.icon.background = swatch(row.color)
++            }
++            binding.root.setOnClickListener { row.onClick() }
++            binding.root.setOnLongClickListener(null)
++        }
++
++        private fun swatch(color: Int): GradientDrawable =
++            GradientDrawable().apply {
++                shape = GradientDrawable.OVAL
++                setColor(color)
++                setStroke(
++                    (1f * resources.displayMetrics.density).toInt().coerceAtLeast(1),
++                    0x33000000
++                )
++            }
++    }
++
++    companion object {
++        private const val STATE_BODY = "overlay_color_body"
++        private const val STATE_MAP = "overlay_color_map"
++        private const val STATE_FACE = "overlay_color_face"
++        private const val STATE_EDITING = "overlay_color_editing"
++        private const val STATE_DESTINATION = "overlay_color_destination"
++        private const val STATE_ENTRY_SKIPS_HUB = "overlay_color_entry_skips_hub"
++        private const val EXTRA_DESTINATION = "overlay_color_start_destination"
++
++        fun createIntent(context: Context): Intent = intentWithDestination(context, Destination.HUB)
++
++        fun createTemplateIntent(context: Context): Intent =
++            intentWithDestination(context, Destination.TEMPLATE)
++
++        fun createPresetsIntent(context: Context): Intent =
++            intentWithDestination(context, Destination.PRESETS)
++
++        private fun intentWithDestination(context: Context, destination: Destination): Intent =
++            Intent(context, OverlayColorActivity::class.java).apply {
++                putExtra(EXTRA_DESTINATION, destination.ordinal)
++            }
++    }
++}
+diff --git a/src/android/app/src/main/java/org/yuzu/yuzu_emu/overlay/OverlayColorConfigTransfer.kt b/src/android/app/src/main/java/org/yuzu/yuzu_emu/overlay/OverlayColorConfigTransfer.kt
+new file mode 100644
+--- /dev/null
++++ b/src/android/app/src/main/java/org/yuzu/yuzu_emu/overlay/OverlayColorConfigTransfer.kt
+@@ -0,0 +1,213 @@
++// SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
++// SPDX-License-Identifier: GPL-3.0-or-later
++
++package org.yuzu.yuzu_emu.overlay
++
++import android.net.Uri
++import android.provider.OpenableColumns
++import android.view.LayoutInflater
++import android.view.View
++import android.view.ViewGroup
++import android.widget.Toast
++import androidx.appcompat.app.AlertDialog
++import androidx.appcompat.app.AppCompatActivity
++import androidx.recyclerview.widget.LinearLayoutManager
++import androidx.recyclerview.widget.RecyclerView
++import com.google.android.material.dialog.MaterialAlertDialogBuilder
++import com.google.android.material.snackbar.Snackbar
++import org.yuzu.yuzu_emu.R
++import org.yuzu.yuzu_emu.databinding.ListItemOverlayPresetBinding
++
++/**
++ * Import/export overlay color JSON (single design per file) from settings or overlay color UI.
++ */
++class OverlayColorConfigTransfer(
++    private val activity: AppCompatActivity,
++    private val snackbarAnchor: View,
++    private val onImportApplied: () -> Unit = {}
++) {
++    private var pendingExport: String = ""
++    private var presetPickDialog: AlertDialog? = null
++
++    fun launchImport(openDocument: (Array<String>) -> Unit) {
++        openDocument(OverlayPresetLibrary.importMimeTypes)
++    }
++
++    fun launchExport(createDocument: (String) -> Unit) {
++        val choices = buildExportChoices()
++        if (choices.isEmpty()) {
++            Toast.makeText(activity, R.string.overlay_export_none, Toast.LENGTH_LONG).show()
++            return
++        }
++        showPresetPicker(
++            titleRes = R.string.overlay_export_pick_one,
++            presets = choices
++        ) { preset ->
++            pendingExport = OverlayPresetLibrary.exportJson(listOf(preset))
++            createDocument(OverlayPresetLibrary.exportFilenameForPreset(preset.name))
++        }
++    }
++
++    fun handleImportUri(uri: Uri) {
++        if (!OverlayPresetLibrary.isEdenovlUriName(resolveDisplayName(uri))) {
++            Toast.makeText(activity, R.string.overlay_import_edenovl_only, Toast.LENGTH_LONG).show()
++            return
++        }
++        try {
++            val text = activity.contentResolver.openInputStream(uri)?.use {
++                it.readBytes().toString(Charsets.UTF_8)
++            } ?: throw IllegalArgumentException("stream")
++            val candidates = OverlayPresetLibrary.parseImportFile(text)
++            if (candidates.isEmpty()) {
++                throw IllegalArgumentException("empty")
++            }
++            showPresetPicker(
++                titleRes = R.string.overlay_import_pick_one,
++                presets = candidates
++            ) { finishImport(it) }
++        } catch (_: Exception) {
++            Toast.makeText(activity, R.string.overlay_preset_import_failed, Toast.LENGTH_SHORT).show()
++        }
++    }
++
++    fun handleExportUri(uri: Uri) {
++        try {
++            activity.contentResolver.openOutputStream(uri)?.use { stream ->
++                stream.write(pendingExport.toByteArray(Charsets.UTF_8))
++            } ?: throw IllegalStateException("stream")
++            Snackbar.make(snackbarAnchor, R.string.overlay_preset_exported, Snackbar.LENGTH_SHORT).show()
++        } catch (_: Exception) {
++            Toast.makeText(activity, R.string.overlay_preset_import_failed, Toast.LENGTH_SHORT).show()
++        }
++    }
++
++    private fun buildExportChoices(): List<OverlayPresetLibrary.Preset> {
++        val body = OverlayColors.loadBody()
++        val overrides = OverlayColors.loadOverrides()
++        val face = OverlayColors.loadFace()
++        val choices = mutableListOf<OverlayPresetLibrary.Preset>()
++        choices += OverlayPresetLibrary.load()
++        if (OverlayColors.matchingPalette(body, overrides, face) == null) {
++            choices += OverlayPresetLibrary.Preset(
++                OverlayPresetLibrary.LIVE_COLORS_EXPORT_BASENAME,
++                body,
++                face,
++                overrides.toMap()
++            )
++        }
++        return choices
++    }
++
++    private fun reservedNameKeys(): Set<String> {
++        val labels = OverlayColors.palettes.map { activity.getString(it.labelRes) }
++        return OverlayColors.reservedPresetNameKeys(labels)
++    }
++
++    private fun finishImport(preset: OverlayPresetLibrary.Preset) {
++        val body = preset.body or 0xFF000000.toInt()
++        OverlayColors.write(body, preset.overrides, preset.face)
++        val matchesBuiltin = OverlayColors.matchingPalette(body, preset.overrides, preset.face) != null
++        val reservedName = OverlayPresetLibrary.isReservedName(preset.name, reservedNameKeys())
++        val persistToLibrary = {
++            OverlayPresetLibrary.importSelected(preset)
++            onImportApplied()
++        }
++        if (!matchesBuiltin && !reservedName) {
++            if (OverlayPresetLibrary.findSavedByExactName(preset.name) != null) {
++                MaterialAlertDialogBuilder(activity)
++                    .setTitle(R.string.overlay_preset_overwrite)
++                    .setMessage(
++                        activity.getString(R.string.overlay_preset_overwrite_message, preset.name)
++                    )
++                    .setNegativeButton(android.R.string.cancel) { _, _ -> onImportApplied() }
++                    .setPositiveButton(R.string.overlay_preset_overwrite_confirm) { _, _ ->
++                        persistToLibrary()
++                    }
++                    .show()
++            } else {
++                persistToLibrary()
++            }
++        } else {
++            onImportApplied()
++        }
++        Snackbar.make(
++            snackbarAnchor,
++            activity.getString(R.string.overlay_preset_imported_one, preset.name),
++            Snackbar.LENGTH_SHORT
++        ).show()
++    }
++
++    private fun showPresetPicker(
++        titleRes: Int,
++        presets: List<OverlayPresetLibrary.Preset>,
++        onPick: (OverlayPresetLibrary.Preset) -> Unit
++    ) {
++        presetPickDialog?.dismiss()
++        val list = RecyclerView(activity).apply {
++            layoutManager = LinearLayoutManager(activity)
++            adapter = PresetPickAdapter(presets, onPick) {
++                presetPickDialog?.dismiss()
++            }
++            val pad = (8 * activity.resources.displayMetrics.density).toInt()
++            setPadding(0, pad, 0, pad)
++        }
++        presets.forEach { preset ->
++            OverlayPresetThumbnailCache.preload(
++                activity,
++                preset.body,
++                preset.face,
++                preset.overrides
++            )
++        }
++        presetPickDialog = MaterialAlertDialogBuilder(activity)
++            .setTitle(titleRes)
++            .setView(list)
++            .setNegativeButton(android.R.string.cancel, null)
++            .create()
++        presetPickDialog?.show()
++    }
++
++    private fun resolveDisplayName(uri: Uri): String? {
++        activity.contentResolver.query(uri, null, null, null, null)?.use { cursor ->
++            val index = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
++            if (index >= 0 && cursor.moveToFirst()) {
++                return cursor.getString(index)
++            }
++        }
++        return uri.lastPathSegment
++    }
++
++    private class PresetPickAdapter(
++        private val presets: List<OverlayPresetLibrary.Preset>,
++        private val onPick: (OverlayPresetLibrary.Preset) -> Unit,
++        private val onDismissDialog: () -> Unit
++    ) : RecyclerView.Adapter<PresetPickAdapter.Holder>() {
++
++        class Holder(val binding: ListItemOverlayPresetBinding) : RecyclerView.ViewHolder(binding.root)
++
++        override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): Holder {
++            val inflater = LayoutInflater.from(parent.context)
++            return Holder(ListItemOverlayPresetBinding.inflate(inflater, parent, false))
++        }
++
++        override fun onBindViewHolder(holder: Holder, position: Int) {
++            val preset = presets[position]
++            holder.binding.presetTitle.text = if (
++                preset.name == OverlayPresetLibrary.LIVE_COLORS_EXPORT_BASENAME
++            ) {
++                holder.binding.root.context.getString(R.string.overlay_export_current)
++            } else {
++                preset.name
++            }
++            holder.binding.presetPreview.setPreset(preset.body, preset.face, preset.overrides)
++            val pick = {
++                onDismissDialog()
++                onPick(preset)
++            }
++            holder.binding.root.setOnClickListener { pick() }
++            holder.binding.presetPreview.setOnClickListener { pick() }
++        }
++
++        override fun getItemCount(): Int = presets.size
++    }
++}
+diff --git a/src/android/app/src/main/java/org/yuzu/yuzu_emu/overlay/OverlayColors.kt b/src/android/app/src/main/java/org/yuzu/yuzu_emu/overlay/OverlayColors.kt
+new file mode 100644
+--- /dev/null
++++ b/src/android/app/src/main/java/org/yuzu/yuzu_emu/overlay/OverlayColors.kt
+@@ -0,0 +1,415 @@
++// SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
++// SPDX-License-Identifier: GPL-3.0-or-later
++
++package org.yuzu.yuzu_emu.overlay
++
++import android.graphics.Color
++import android.graphics.drawable.GradientDrawable
++import java.util.Locale
++import org.yuzu.yuzu_emu.R
++import org.yuzu.yuzu_emu.features.settings.model.IntSetting
++import org.yuzu.yuzu_emu.features.settings.model.StringSetting
++import org.yuzu.yuzu_emu.overlay.model.OverlayControl
++import org.yuzu.yuzu_emu.overlay.model.OverlayLayout
++import org.yuzu.yuzu_emu.utils.NativeConfig
++
++/**
++ * Base color tint ([IntSetting.OVERLAY_COLOR]) plus optional per-button colors
++ * stored as `id=AARRGGBB` pairs in [StringSetting.OVERLAY_CONTROL_COLORS].
++ */
++object OverlayColors {
++    const val DEFAULT_COLOR = 0xFFFFFFFF.toInt()
++    const val BASE = "base"
++    const val FACE_LETTERS = "letters"
++
++    private const val EDEN_PINK = 0xFFFF4D9A.toInt()
++    private const val EDEN_PURPLE = 0xFF7B4DFF.toInt()
++    private const val EDEN_BLUE = 0xFF9FD8F5.toInt()
++    private const val JOY_RED = 0xFFFF3C28.toInt()
++    private const val JOY_BLUE = 0xFF0AB9E6.toInt()
++
++    /** Cool off-white with a blue cast, close to the Super Famicom shell. */
++    private const val SFC_BODY = 0xFFE4E8F0.toInt()
++    private const val RAL_3020 = 0xFFCC0605.toInt()
++    private const val RAL_1003 = 0xFFF9A800.toInt()
++    private const val RAL_6029 = 0xFF007243.toInt()
++    private const val SFC_LOGO_BLUE = 0xFF2E45B5.toInt()
++
++    /** US Super NES preset. */
++    private const val SNES_BODY = 0xFF8F7FA8.toInt()
++    private const val SNES_BTN_AB = 0xFF511D93.toInt()
++    private const val SNES_BTN_XY = 0xFF7B4BB5.toInt()
++
++    /** GameCube preset (matches bundled export). */
++    private const val GC_BODY = 0xFF4A3D7A.toInt()
++    private const val GC_GREEN = 0xFF6DBF48.toInt()
++    private const val GC_RED = 0xFFE03C31.toInt()
++    private const val GC_FACE_GRAY = 0xFFC0C0C8.toInt()
++    private const val GC_STICK_CLICK = 0xFF2E2A32.toInt()
++    private const val GC_C_STICK = 0xFFFFD200.toInt()
++
++    private const val FAMICOM_BODY = 0xFFF3E2C4.toInt()
++    private const val FAMICOM_RED = 0xFFE10600.toInt()
++    private const val FAMICOM_DARK = 0xFFA10600.toInt()
++
++    /** NES-style red shell with gray system controls. */
++    private const val NES_BODY = 0xFFFF0000.toInt()
++    private const val NES_GRAY = 0xFF999999.toInt()
++    private const val NES_DARK = 0xFF555555.toInt()
++    private const val NES_DPAD = 0xFFD10000.toInt()
++
++    enum class PreviewKind {
++        SOLID,
++        GRADIENT,
++        BANDS
++    }
++
++    data class Preview(
++        val kind: PreviewKind,
++        val colors: IntArray,
++        val orientation: GradientDrawable.Orientation = GradientDrawable.Orientation.TOP_BOTTOM
++    )
++
++    data class Palette(
++        val key: String,
++        val labelRes: Int,
++        val body: Int,
++        val overrides: Map<String, Int>,
++        val preview: Preview,
++        val face: String = FACE_LETTERS
++    )
++
++    data class Target(val id: String, val labelRes: Int)
++
++    val targets: List<Target> = listOf(
++        Target(OverlayControl.BUTTON_A.id, R.string.button_a),
++        Target(OverlayControl.BUTTON_B.id, R.string.button_b),
++        Target(OverlayControl.BUTTON_X.id, R.string.button_x),
++        Target(OverlayControl.BUTTON_Y.id, R.string.button_y),
++        Target(OverlayControl.COMBINED_DPAD.id, R.string.dpad),
++        Target(OverlayControl.BUTTON_L.id, R.string.button_l),
++        Target(OverlayControl.BUTTON_R.id, R.string.button_r),
++        Target(OverlayControl.BUTTON_ZL.id, R.string.button_zl),
++        Target(OverlayControl.BUTTON_ZR.id, R.string.button_zr),
++        Target(OverlayControl.STICK_L.id, R.string.overlay_color_left_stick),
++        Target(OverlayControl.STICK_R.id, R.string.overlay_color_right_stick),
++        Target(OverlayControl.BUTTON_STICK_L.id, R.string.overlay_stick_left_press),
++        Target(OverlayControl.BUTTON_STICK_R.id, R.string.overlay_stick_right_press),
++        Target(OverlayControl.BUTTON_MINUS.id, R.string.button_minus),
++        Target(OverlayControl.BUTTON_PLUS.id, R.string.button_plus),
++        Target(OverlayControl.BUTTON_CAPTURE.id, R.string.button_capture),
++        Target(OverlayControl.BUTTON_HOME.id, R.string.button_home)
++    )
++
++    val palettes: List<Palette> by lazy {
++        listOf(
++            Palette(
++                key = "original",
++                labelRes = R.string.overlay_color_default,
++                body = DEFAULT_COLOR,
++                overrides = emptyMap(),
++                preview = Preview(PreviewKind.SOLID, intArrayOf(DEFAULT_COLOR))
++            ),
++            Palette(
++                key = "eden",
++                labelRes = R.string.overlay_preset_eden,
++                body = EDEN_PURPLE,
++                overrides = byHeight(::edenColor),
++                preview = Preview(
++                    PreviewKind.GRADIENT,
++                    intArrayOf(EDEN_PINK, EDEN_PURPLE, EDEN_BLUE)
++                )
++            ),
++            Palette(
++                key = "joycon",
++                labelRes = R.string.overlay_preset_joycon,
++                body = JOY_BLUE,
++                overrides = sideSplit(JOY_RED, JOY_BLUE),
++                preview = Preview(
++                    PreviewKind.GRADIENT,
++                    intArrayOf(JOY_RED, JOY_BLUE),
++                    GradientDrawable.Orientation.LEFT_RIGHT
++                )
++            ),
++            Palette(
++                key = "super_famicom",
++                labelRes = R.string.overlay_preset_super_famicom,
++                body = SFC_BODY,
++                overrides = face(SFC_BODY, RAL_3020, RAL_1003, RAL_6029, SFC_LOGO_BLUE),
++                preview = Preview(
++                    PreviewKind.BANDS,
++                    intArrayOf(SFC_BODY, RAL_3020, RAL_1003, RAL_6029, SFC_LOGO_BLUE)
++                )
++            ),
++            Palette(
++                key = "snes",
++                labelRes = R.string.overlay_preset_snes,
++                body = SNES_BODY,
++                overrides = mapOf(
++                    OverlayControl.BUTTON_A.id to SNES_BTN_AB,
++                    OverlayControl.BUTTON_B.id to SNES_BTN_AB,
++                    OverlayControl.BUTTON_X.id to SNES_BTN_XY,
++                    OverlayControl.BUTTON_Y.id to SNES_BTN_XY,
++                    OverlayControl.COMBINED_DPAD.id to SNES_BTN_AB
++                ),
++                preview = Preview(
++                    PreviewKind.BANDS,
++                    intArrayOf(SNES_BODY, SNES_BTN_XY, SNES_BTN_AB)
++                )
++            ),
++            Palette(
++                key = "gamecube",
++                labelRes = R.string.overlay_preset_gamecube,
++                body = GC_BODY,
++                overrides = mapOf(
++                    OverlayControl.BUTTON_A.id to GC_GREEN,
++                    OverlayControl.BUTTON_B.id to GC_RED,
++                    OverlayControl.BUTTON_X.id to GC_FACE_GRAY,
++                    OverlayControl.BUTTON_Y.id to GC_FACE_GRAY,
++                    OverlayControl.BUTTON_STICK_L.id to GC_STICK_CLICK,
++                    OverlayControl.BUTTON_STICK_R.id to GC_STICK_CLICK,
++                    OverlayControl.STICK_L.id to GC_FACE_GRAY,
++                    OverlayControl.STICK_R.id to GC_C_STICK,
++                    OverlayControl.COMBINED_DPAD.id to GC_FACE_GRAY
++                ),
++                preview = Preview(
++                    PreviewKind.BANDS,
++                    intArrayOf(GC_BODY, GC_GREEN, GC_RED, GC_FACE_GRAY, GC_C_STICK)
++                )
++            ),
++            Palette(
++                key = "nes",
++                labelRes = R.string.overlay_preset_nes,
++                body = NES_BODY,
++                overrides = mapOf(
++                    OverlayControl.BUTTON_PLUS.id to NES_GRAY,
++                    OverlayControl.BUTTON_MINUS.id to NES_GRAY,
++                    OverlayControl.BUTTON_HOME.id to NES_GRAY,
++                    OverlayControl.BUTTON_CAPTURE.id to NES_GRAY,
++                    OverlayControl.BUTTON_L.id to NES_DARK,
++                    OverlayControl.BUTTON_R.id to NES_DARK,
++                    OverlayControl.BUTTON_ZL.id to NES_DARK,
++                    OverlayControl.BUTTON_ZR.id to NES_DARK,
++                    OverlayControl.STICK_L.id to NES_GRAY,
++                    OverlayControl.STICK_R.id to NES_GRAY,
++                    OverlayControl.COMBINED_DPAD.id to NES_DPAD
++                ),
++                preview = Preview(
++                    PreviewKind.BANDS,
++                    intArrayOf(NES_BODY, NES_DPAD, NES_GRAY, NES_DARK)
++                )
++            ),
++            Palette(
++                key = "famicom",
++                labelRes = R.string.overlay_preset_famicom,
++                body = FAMICOM_BODY,
++                overrides = face(
++                    FAMICOM_BODY,
++                    FAMICOM_RED,
++                    FAMICOM_RED,
++                    FAMICOM_RED,
++                    FAMICOM_RED,
++                    mapOf(
++                        OverlayControl.COMBINED_DPAD to FAMICOM_DARK,
++                        OverlayControl.BUTTON_STICK_L to FAMICOM_DARK,
++                        OverlayControl.BUTTON_STICK_R to FAMICOM_DARK
++                    )
++                ),
++                preview = Preview(
++                    PreviewKind.BANDS,
++                    intArrayOf(FAMICOM_BODY, FAMICOM_RED, FAMICOM_DARK)
++                )
++            )
++        )
++    }
++
++    private var cachedRaw: String? = null
++    private var cachedBody: Int = DEFAULT_COLOR
++    private var cachedMap: Map<String, Int> = emptyMap()
++
++    fun hexString(color: Int): String =
++        String.format(Locale.US, "#%06X", color and 0xFFFFFF)
++
++    fun loadBody(): Int = IntSetting.OVERLAY_COLOR.getInt() or 0xFF000000.toInt()
++
++    fun loadOverrides(): Map<String, Int> = parse(StringSetting.OVERLAY_CONTROL_COLORS.getString())
++
++    fun loadFace(): String = FACE_LETTERS
++
++    fun colorFor(controlId: String): Int {
++        val body = loadBody()
++        val raw = StringSetting.OVERLAY_CONTROL_COLORS.getString()
++        if (raw != cachedRaw || body != cachedBody) {
++            cachedRaw = raw
++            cachedBody = body
++            cachedMap = parse(raw)
++        }
++        return cachedMap[controlId] ?: body
++    }
++
++    fun write(body: Int, overrides: Map<String, Int>, face: String = FACE_LETTERS) {
++        IntSetting.OVERLAY_COLOR.setInt(body or 0xFF000000.toInt())
++        StringSetting.OVERLAY_CONTROL_COLORS.setString(serialize(overrides, face))
++        cachedRaw = null
++        NativeConfig.saveGlobalConfig()
++    }
++
++    fun resolved(body: Int, overrides: Map<String, Int>, controlId: String): Int =
++        overrides[controlId] ?: body
++
++    fun matchingPalette(body: Int, overrides: Map<String, Int>, face: String): Palette? =
++        palettes.firstOrNull { palette -> matches(palette, body, overrides, face) }
++
++    /** Built-in preset keys plus localized titles (blocks names like GCN / GameCube). */
++    fun reservedPresetNameKeys(displayLabels: Collection<String>): Set<String> {
++        val keys = mutableSetOf<String>()
++        palettes.forEach { palette ->
++            keys.add(OverlayPresetLibrary.nameKey(palette.key))
++        }
++        displayLabels.forEach { label ->
++            keys.add(OverlayPresetLibrary.nameKey(label))
++        }
++        return keys
++    }
++
++    fun presetFromPalette(palette: Palette, displayName: String): OverlayPresetLibrary.Preset =
++        OverlayPresetLibrary.Preset(
++            displayName,
++            palette.body,
++            palette.face,
++            palette.overrides
++        )
++
++    fun labelFor(controlId: String, face: String): Int =
++        targets.firstOrNull { it.id == controlId }?.labelRes ?: R.string.overlay_color
++
++    fun serialize(overrides: Map<String, Int>, face: String = FACE_LETTERS): String {
++        val parts = mutableListOf<String>()
++        OverlayControl.entries.forEach { control ->
++            val color = overrides[control.id] ?: return@forEach
++            parts += "${control.id}=${String.format(Locale.US, "%08X", color)}"
++        }
++        return parts.joinToString(",")
++    }
++
++    fun parseHex(text: String): Int? {
++        val cleaned = text.trim().removePrefix("#")
++        val value = cleaned.toLongOrNull(16) ?: return null
++        return when (cleaned.length) {
++            6 -> (value or 0xFF000000L).toInt()
++            8 -> (value or 0xFF000000L).toInt()
++            else -> null
++        }
++    }
++
++    fun parse(raw: String): Map<String, Int> {
++        if (raw.isBlank()) {
++            return emptyMap()
++        }
++        val out = linkedMapOf<String, Int>()
++        raw.split(',').forEach { token ->
++            val parts = token.split('=')
++            if (parts.size != 2 || OverlayControl.from(parts[0]) == null) {
++                return@forEach
++            }
++            val color = parts[1].toLongOrNull(16) ?: return@forEach
++            out[parts[0]] = (color or 0xFF000000L).toInt()
++        }
++        return out
++    }
++
++    private fun matches(
++        palette: Palette,
++        body: Int,
++        overrides: Map<String, Int>,
++        face: String
++    ): Boolean {
++        if (palette.face != face) {
++            return false
++        }
++        if ((palette.body and 0xFFFFFF) != (body and 0xFFFFFF)) {
++            return false
++        }
++        return OverlayControl.entries.all { control ->
++            val want = palette.overrides[control.id] ?: palette.body
++            val have = overrides[control.id] ?: body
++            (want and 0xFFFFFF) == (have and 0xFFFFFF)
++        }
++    }
++
++    private fun byHeight(colorAt: (Float) -> Int): Map<String, Int> =
++        OverlayControl.entries.associate { control ->
++            val y = control.getDefaultPositionForLayout(OverlayLayout.Landscape).second.toFloat()
++            control.id to colorAt(y)
++        }
++
++    private fun sideSplit(left: Int, right: Int): Map<String, Int> =
++        OverlayControl.entries.associate { control ->
++            val x = control.getDefaultPositionForLayout(OverlayLayout.Landscape).first.toFloat()
++            control.id to if (x < 0.5f) left else right
++        }
++
++    private fun face(
++        body: Int,
++        a: Int,
++        b: Int,
++        x: Int,
++        y: Int,
++        extra: Map<OverlayControl, Int> = emptyMap()
++    ): Map<String, Int> {
++        val map = linkedMapOf<String, Int>()
++        fun put(control: OverlayControl, color: Int) {
++            val opaque = color or 0xFF000000.toInt()
++            if ((opaque and 0xFFFFFF) != (body and 0xFFFFFF)) {
++                map[control.id] = opaque
++            }
++        }
++        put(OverlayControl.BUTTON_A, a)
++        put(OverlayControl.BUTTON_B, b)
++        put(OverlayControl.BUTTON_X, x)
++        put(OverlayControl.BUTTON_Y, y)
++        extra.forEach { (control, color) -> put(control, color) }
++        return map
++    }
++
++    private fun edenColor(y: Float): Int {
++        val t = y.coerceIn(0f, 1f)
++        return if (t <= 0.5f) {
++            mix(EDEN_PINK, EDEN_PURPLE, t / 0.5f)
++        } else {
++            mix(EDEN_PURPLE, EDEN_BLUE, (t - 0.5f) / 0.5f)
++        }
++    }
++
++    private fun mix(start: Int, end: Int, amount: Float): Int {
++        val t = amount.coerceIn(0f, 1f)
++        return Color.rgb(
++            (Color.red(start) + (Color.red(end) - Color.red(start)) * t).toInt(),
++            (Color.green(start) + (Color.green(end) - Color.green(start)) * t).toInt(),
++            (Color.blue(start) + (Color.blue(end) - Color.blue(start)) * t).toInt()
++        )
++    }
++
++    fun previewDrawable(preview: Preview): GradientDrawable {
++        val strokePx = 1
++        val strokeColor = 0x33000000
++        return when (preview.kind) {
++            PreviewKind.SOLID -> GradientDrawable().apply {
++                shape = GradientDrawable.OVAL
++                setColor(preview.colors.first())
++                setStroke(strokePx, strokeColor)
++            }
++            PreviewKind.GRADIENT -> GradientDrawable(preview.orientation, preview.colors).apply {
++                shape = GradientDrawable.OVAL
++                setStroke(strokePx, strokeColor)
++            }
++            PreviewKind.BANDS -> GradientDrawable(
++                GradientDrawable.Orientation.LEFT_RIGHT,
++                preview.colors
++            ).apply {
++                shape = GradientDrawable.OVAL
++                setStroke(strokePx, strokeColor)
++            }
++        }
++    }
++}
+diff --git a/src/android/app/src/main/java/org/yuzu/yuzu_emu/overlay/OverlayControlIcons.kt b/src/android/app/src/main/java/org/yuzu/yuzu_emu/overlay/OverlayControlIcons.kt
+new file mode 100644
+--- /dev/null
++++ b/src/android/app/src/main/java/org/yuzu/yuzu_emu/overlay/OverlayControlIcons.kt
+@@ -0,0 +1,256 @@
++// SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
++// SPDX-License-Identifier: GPL-3.0-or-later
++
++package org.yuzu.yuzu_emu.overlay
++
++import android.content.Context
++import android.graphics.Bitmap
++import android.graphics.Canvas
++import android.graphics.Color
++import android.graphics.ColorMatrix
++import android.graphics.ColorMatrixColorFilter
++import android.graphics.Paint
++import android.graphics.drawable.BitmapDrawable
++import android.graphics.drawable.Drawable
++import android.graphics.drawable.VectorDrawable
++import android.util.LruCache
++import androidx.core.content.ContextCompat
++import kotlin.math.max
++import org.yuzu.yuzu_emu.R
++import org.yuzu.yuzu_emu.overlay.model.OverlayControl
++
++/**
++ * Small tinted overlay control artwork for the custom design list (same vectors as in-game).
++ */
++object OverlayControlIcons {
++    /** Matches [R.layout.list_item_setting] icon size (24dp), rendered oversampled for sharp downscale. */
++    private const val LIST_ICON_DP = 24f
++    /** Custom design list and color editor preview. */
++    const val DESIGN_PREVIEW_ICON_DP = 24f
++    const val EDITOR_PREVIEW_ICON_DP = 36f
++    private const val RENDER_OVERSAMPLE = 2f
++    /** Inner stick draw size vs outer ring; matches [InputOverlay.initializeOverlayJoystick]. */
++    private const val STICK_INNER_TO_OUTER = 1.66f
++    private val cache = LruCache<String, Bitmap>(48)
++
++    /** Empty face circle (no label), same artwork tint path as face buttons. */
++    fun tintedBaseColorIcon(
++        context: Context,
++        body: Int,
++        iconSizeDp: Float = LIST_ICON_DP
++    ): Drawable? = tintedArtwork(context, R.drawable.facebutton_empty, body, iconSizeDp, 0.11f)
++
++    /** Wide base-color bar for the tint editor (same artwork tint path as face buttons). */
++    fun tintedBaseColorEditorPreview(context: Context, body: Int): Drawable? {
++        val tint = body or 0xFF000000.toInt()
++        val key = "base|editor|${tint and 0xFFFFFF}"
++        val bitmap = cache.get(key) ?: renderBaseColorEditorPreview(context, tint).also { cache.put(key, it) }
++        return BitmapDrawable(context.resources, bitmap).apply {
++            setAntiAlias(true)
++            setFilterBitmap(false)
++        }
++    }
++
++    fun tintedIcon(
++        context: Context,
++        controlId: String,
++        body: Int,
++        face: String,
++        overrides: Map<String, Int>,
++        iconSizeDp: Float = LIST_ICON_DP
++    ): Drawable? {
++        if (controlId == OverlayColors.BASE) {
++            return tintedBaseColorIcon(context, body, iconSizeDp)
++        }
++        val tint = OverlayColors.resolved(body, overrides, controlId)
++        val key = when (controlId) {
++            OverlayControl.STICK_L.id,
++            OverlayControl.STICK_R.id -> "stick|$controlId|$face|${tint and 0xFFFFFF}|$iconSizeDp"
++            else -> {
++                val drawableId = artworkDrawable(face, controlId) ?: return null
++                "$controlId|$face|${tint and 0xFFFFFF}|$drawableId|$iconSizeDp"
++            }
++        }
++        val bitmap = cache.get(key) ?: when (controlId) {
++            OverlayControl.STICK_L.id,
++            OverlayControl.STICK_R.id -> renderStick(context, tint, iconSizeDp)
++            else -> {
++                val drawableId = artworkDrawable(face, controlId) ?: return null
++                render(context, drawableId, tint, iconSizeDp)
++            }
++        }.also { cache.put(key, it) }
++        return BitmapDrawable(context.resources, bitmap).apply {
++            setAntiAlias(true)
++            setFilterBitmap(false)
++        }
++    }
++
++    private fun targetMaxPixels(context: Context, iconSizeDp: Float): Int {
++        val density = context.resources.displayMetrics.density
++        return (iconSizeDp * density * RENDER_OVERSAMPLE).toInt().coerceAtLeast(48)
++    }
++
++    private fun artworkDrawable(face: String, controlId: String): Int? =
++        when (controlId) {
++            OverlayControl.BUTTON_A.id -> R.drawable.facebutton_a
++            OverlayControl.BUTTON_B.id -> R.drawable.facebutton_b
++            OverlayControl.BUTTON_X.id -> R.drawable.facebutton_x
++            OverlayControl.BUTTON_Y.id -> R.drawable.facebutton_y
++            OverlayControl.BUTTON_PLUS.id -> R.drawable.facebutton_plus
++            OverlayControl.BUTTON_MINUS.id -> R.drawable.facebutton_minus
++            OverlayControl.BUTTON_HOME.id -> R.drawable.facebutton_home
++            OverlayControl.BUTTON_CAPTURE.id -> R.drawable.facebutton_screenshot
++            OverlayControl.BUTTON_L.id -> R.drawable.l_shoulder
++            OverlayControl.BUTTON_R.id -> R.drawable.r_shoulder
++            OverlayControl.BUTTON_ZL.id -> R.drawable.zl_trigger
++            OverlayControl.BUTTON_ZR.id -> R.drawable.zr_trigger
++            OverlayControl.BUTTON_STICK_L.id -> R.drawable.button_l3
++            OverlayControl.BUTTON_STICK_R.id -> R.drawable.button_r3
++            OverlayControl.STICK_L.id,
++            OverlayControl.STICK_R.id -> R.drawable.joystick
++            OverlayControl.COMBINED_DPAD.id -> R.drawable.dpad_standard
++            else -> null
++        }
++
++    private fun artworkScale(drawableId: Int): Float =
++        when (drawableId) {
++            R.drawable.facebutton_home,
++            R.drawable.facebutton_screenshot,
++            R.drawable.facebutton_plus,
++            R.drawable.facebutton_minus -> 0.07f
++            R.drawable.l_shoulder,
++            R.drawable.r_shoulder,
++            R.drawable.zl_trigger,
++            R.drawable.zr_trigger -> 0.26f
++            R.drawable.button_l3,
++            R.drawable.button_r3 -> 0.155f
++            R.drawable.dpad_standard -> 0.25f
++            R.drawable.joystick_range,
++            R.drawable.joystick -> 0.3f
++            R.drawable.overlay_base_color_bar -> 0.11f
++            else -> 0.11f
++        }
++
++    private fun render(
++        context: Context,
++        drawableId: Int,
++        tint: Int,
++        iconSizeDp: Float,
++        artScale: Float = artworkScale(drawableId)
++    ): Bitmap =
++        renderDrawable(
++            context,
++            drawableId,
++            artScale,
++            targetMaxPixels(context, iconSizeDp),
++            tint
++        )
++
++    private fun tintedArtwork(
++        context: Context,
++        drawableId: Int,
++        tint: Int,
++        iconSizeDp: Float,
++        artScale: Float
++    ): Drawable? {
++        val key = "art|$drawableId|${tint and 0xFFFFFF}|$iconSizeDp|$artScale"
++        val bitmap = cache.get(key) ?: render(context, drawableId, tint, iconSizeDp, artScale)
++            .also { cache.put(key, it) }
++        return BitmapDrawable(context.resources, bitmap).apply {
++            setAntiAlias(true)
++            setFilterBitmap(false)
++        }
++    }
++
++    private fun renderBaseColorEditorPreview(context: Context, tint: Int): Bitmap {
++        val density = context.resources.displayMetrics.density
++        val targetMaxPx = (200f * density * RENDER_OVERSAMPLE).toInt().coerceAtLeast(48)
++        return renderDrawable(
++            context,
++            R.drawable.overlay_base_color_bar,
++            artworkScale(R.drawable.overlay_base_color_bar),
++            targetMaxPx,
++            tint
++        )
++    }
++
++    private fun renderStick(context: Context, tint: Int, iconSizeDp: Float): Bitmap {
++        val target = targetMaxPixels(context, iconSizeDp)
++        val outer = renderDrawable(context, R.drawable.joystick_range, 0.3f, target, tint)
++        val innerTarget =
++            (max(outer.width, outer.height) / STICK_INNER_TO_OUTER).toInt().coerceAtLeast(1)
++        val inner = renderDrawable(context, R.drawable.joystick, 1.0f, innerTarget, tint)
++        val composite = Bitmap.createBitmap(outer.width, outer.height, Bitmap.Config.ARGB_8888)
++        val canvas = Canvas(composite)
++        canvas.drawBitmap(outer, 0f, 0f, null)
++        val left = (outer.width - inner.width) / 2f
++        val top = (outer.height - inner.height) / 2f
++        canvas.drawBitmap(inner, left, top, null)
++        outer.recycle()
++        inner.recycle()
++        return composite
++    }
++
++    /** Same sizing rule as [InputOverlay.getBitmap], with [targetMaxPx] instead of screen size. */
++    private fun renderDrawable(
++        context: Context,
++        drawableId: Int,
++        artScale: Float,
++        targetMaxPx: Int,
++        tint: Int
++    ): Bitmap {
++        val vectorDrawable = ContextCompat.getDrawable(context, drawableId) as VectorDrawable
++        val minScreenDimension = targetMaxPx / artScale
++
++        val bitmap = Bitmap.createBitmap(
++            (vectorDrawable.intrinsicWidth * artScale).toInt().coerceAtLeast(1),
++            (vectorDrawable.intrinsicHeight * artScale).toInt().coerceAtLeast(1),
++            Bitmap.Config.ARGB_8888
++        )
++        val maxBitmapDimension = max(bitmap.width, bitmap.height).coerceAtLeast(1)
++        val bitmapScale = artScale * minScreenDimension / maxBitmapDimension
++        val scaledBitmap = Bitmap.createScaledBitmap(
++            bitmap,
++            (bitmap.width * bitmapScale).toInt().coerceAtLeast(1),
++            (bitmap.height * bitmapScale).toInt().coerceAtLeast(1),
++            true
++        )
++        if (bitmap !== scaledBitmap) {
++            bitmap.recycle()
++        }
++        val canvas = Canvas(scaledBitmap)
++        vectorDrawable.setBounds(0, 0, canvas.width, canvas.height)
++        vectorDrawable.draw(canvas)
++        return applyOverlayTint(scaledBitmap, tint)
++    }
++
++    private fun applyOverlayTint(source: Bitmap, tint: Int): Bitmap {
++        val opaque = tint or 0xFF000000.toInt()
++        val red = Color.red(opaque) / 255f
++        val green = Color.green(opaque) / 255f
++        val blue = Color.blue(opaque) / 255f
++        if (red >= 0.999f && green >= 0.999f && blue >= 0.999f) {
++            return source
++        }
++        if (source.width <= 0 || source.height <= 0) {
++            return source
++        }
++        val tinted = Bitmap.createBitmap(source.width, source.height, Bitmap.Config.ARGB_8888)
++        val canvas = Canvas(tinted)
++        val paint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG).apply {
++            colorFilter = ColorMatrixColorFilter(
++                ColorMatrix(
++                    floatArrayOf(
++                        red, 0f, 0f, 0f, 0f,
++                        0f, green, 0f, 0f, 0f,
++                        0f, 0f, blue, 0f, 0f,
++                        0f, 0f, 0f, 1f, 0f
++                    )
++                )
++            )
++        }
++        canvas.drawBitmap(source, 0f, 0f, paint)
++        source.recycle()
++        return tinted
++    }
++}
+diff --git a/src/android/app/src/main/java/org/yuzu/yuzu_emu/overlay/OverlayPresetLibrary.kt b/src/android/app/src/main/java/org/yuzu/yuzu_emu/overlay/OverlayPresetLibrary.kt
+new file mode 100644
+--- /dev/null
++++ b/src/android/app/src/main/java/org/yuzu/yuzu_emu/overlay/OverlayPresetLibrary.kt
+@@ -0,0 +1,416 @@
++// SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
++// SPDX-License-Identifier: GPL-3.0-or-later
++
++package org.yuzu.yuzu_emu.overlay
++
++import java.io.File
++import java.util.Locale
++import org.json.JSONArray
++import org.json.JSONObject
++import org.yuzu.yuzu_emu.YuzuApplication
++import org.yuzu.yuzu_emu.overlay.model.OverlayControl
++import org.yuzu.yuzu_emu.utils.DirectoryInitialization
++
++/**
++ * Named overlay color presets kept on device. Shareable `.edenovl` files (JSON) hold one design each;
++ * Import accepts only files named `.edenovl` (JSON inside). On-device library is `config/presets.edenovl` with a `presets` array.
++ */
++object OverlayPresetLibrary {
++    data class Preset(
++        val name: String,
++        val body: Int,
++        val face: String,
++        val overrides: Map<String, Int>
++    )
++
++    private const val STORAGE_FILE_NAME = "presets.edenovl"
++    private const val LEGACY_JSON_FILE_NAME = "overlay_color_presets.json"
++    private const val JSON_KEY_BASE_COLOR = "base_color"
++    private const val JSON_KEY_SHELL_LEGACY = "shell"
++
++    /**
++     * Path under the user data root in export.zip archives.
++     * Other Switch frontends only require [config/config.ini]; extra JSON here is ignored safely.
++     */
++    const val USER_DATA_RELATIVE_PATH = "config/$STORAGE_FILE_NAME"
++
++    /** Exported shareable designs (JSON body, [EXPORT_FILE_EXTENSION] on disk). */
++    const val EXPORT_FILE_EXTENSION = "edenovl"
++    /** Not application/json — pickers append .json and produce `.edenovl.json` filenames. */
++    const val EXPORT_MIME_TYPE = "application/octet-stream"
++    const val DEFAULT_EXPORT_FILENAME = "overlay-preset.$EXPORT_FILE_EXTENSION"
++    /** Basename for exporting unsaved on-screen colors (becomes `myoverlay.edenovl`). */
++    const val LIVE_COLORS_EXPORT_BASENAME = "myoverlay"
++
++    /** Open-document filter; import still validates the [.edenovl] extension. */
++    val importMimeTypes: Array<String> = arrayOf("*/*")
++
++    fun exportFilenameForPreset(displayName: String): String {
++        var base = displayName.trim()
++            .replace(Regex("[\\\\/:*?\"<>|\\n\\r]"), "_")
++            .take(40)
++        while (base.lowercase(Locale.US).endsWith(".json")) {
++            base = base.dropLast(5)
++        }
++        if (base.lowercase(Locale.US).endsWith(".$EXPORT_FILE_EXTENSION")) {
++            return base
++        }
++        return if (base.isEmpty()) {
++            DEFAULT_EXPORT_FILENAME
++        } else {
++            "$base.$EXPORT_FILE_EXTENSION"
++        }
++    }
++
++    fun isEdenovlUriName(name: String?): Boolean {
++        if (name.isNullOrBlank()) {
++            return false
++        }
++        val lower = name.lowercase(Locale.US)
++        if (lower.endsWith(".json")) {
++            return false
++        }
++        return lower.endsWith(".$EXPORT_FILE_EXTENSION")
++    }
++
++    private val NAME_ALIASES = mapOf(
++        "gcn" to "gamecube",
++        "ngc" to "gamecube",
++        "gc" to "gamecube",
++        "gamecube" to "gamecube",
++        "snes" to "snes",
++        "supernes" to "snes",
++        "supernintendo" to "snes",
++        "supernesusa" to "snes",
++        "sfc" to "superfamicom",
++        "superfamicom" to "superfamicom",
++        "nes" to "nes",
++        "nintendo" to "nes"
++    )
++
++    fun nameKey(name: String): String {
++        val normalized = name
++            .lowercase(Locale.US)
++            .filter { it.isLetterOrDigit() }
++        if (normalized.isEmpty()) {
++            return ""
++        }
++        return NAME_ALIASES[normalized] ?: normalized
++    }
++
++    fun contentSignature(body: Int, face: String, overrides: Map<String, Int>): String {
++        val baseRgb = body and 0xFFFFFF
++        val buttons = overrides.entries
++            .sortedBy { it.key }
++            .joinToString(separator = ",") { (id, color) ->
++                "$id=${color and 0xFFFFFF}"
++            }
++        return "$face|$baseRgb|$buttons"
++    }
++
++    fun contentSignature(preset: Preset): String =
++        contentSignature(preset.body, preset.face, preset.overrides)
++
++    /** Every preset entry in a shareable file (for the import picker only). */
++    fun parseImportFile(raw: String): List<Preset> = parseDocument(raw)
++
++    /** Call before zipping user data so presets live under [USER_DATA_RELATIVE_PATH]. */
++    fun prepareForUserDataExport() {
++        migrateLegacyStorageIfNeeded()
++    }
++
++    /** Call after user data zip import; picks up presets from standard or legacy zip layouts. */
++    fun onUserDataImportRestored() {
++        val userDir = runCatching {
++            if (DirectoryInitialization.areDirectoriesReady) {
++                DirectoryInitialization.userDirectory
++            } else {
++                null
++            }
++        }.getOrNull() ?: return
++        val target = File(userDir, USER_DATA_RELATIVE_PATH)
++        val legacyAtUserRoot = File(userDir, LEGACY_JSON_FILE_NAME)
++        val legacyInConfig = File(userDir, "config/$LEGACY_JSON_FILE_NAME")
++        if (!target.exists()) {
++            target.parentFile?.mkdirs()
++            when {
++                legacyInConfig.isFile -> legacyInConfig.copyTo(target, overwrite = true)
++                legacyAtUserRoot.isFile -> legacyAtUserRoot.copyTo(target, overwrite = true)
++            }
++        } else {
++            val extra = mutableListOf<Preset>()
++            if (legacyInConfig.isFile) {
++                extra += loadFromFile(legacyInConfig)
++            }
++            if (legacyAtUserRoot.isFile) {
++                extra += loadFromFile(legacyAtUserRoot)
++            }
++            if (extra.isNotEmpty()) {
++                writePresetsToDisk(mergePresets(load(), extra))
++            }
++        }
++        legacyInConfig.delete()
++        legacyAtUserRoot.delete()
++        migrateLegacyStorageIfNeeded()
++    }
++
++    fun load(): List<Preset> {
++        migrateLegacyStorageIfNeeded()
++        val file = storageFile()
++        if (!file.exists()) {
++            return emptyList()
++        }
++        return try {
++            parseDocument(file.readText())
++        } catch (_: Exception) {
++            val backup = backupFile(file)
++            if (backup.exists()) {
++                try {
++                    return parseDocument(backup.readText())
++                } catch (_: Exception) {
++                }
++            }
++            emptyList()
++        }
++    }
++
++    fun save(name: String, body: Int, face: String, overrides: Map<String, Int>): List<Preset> {
++        val trimmed = name.trim().take(40)
++        require(trimmed.isNotEmpty())
++        val signature = contentSignature(body, face, overrides)
++        val next = load()
++            .filterNot {
++                namesMatchExactly(it.name, trimmed) || contentSignature(it) == signature
++            } +
++            Preset(trimmed, body or 0xFF000000.toInt(), OverlayColors.FACE_LETTERS, overrides.toMap())
++        writeStorage(next)
++        return next
++    }
++
++    fun findSavedByExactName(name: String): Preset? {
++        val trimmed = name.trim()
++        if (trimmed.isEmpty()) {
++            return null
++        }
++        return load().firstOrNull { namesMatchExactly(it.name, trimmed) }
++    }
++
++    fun isReservedName(candidate: String, reservedKeys: Set<String>): Boolean {
++        val key = nameKey(candidate)
++        return key.isEmpty() || reservedKeys.contains(key)
++    }
++
++    fun delete(name: String): List<Preset> {
++        val trimmed = name.trim()
++        val next = load().filterNot { namesMatchExactly(it.name, trimmed) }
++        writeStorage(next)
++        return next
++    }
++
++    private fun namesMatchExactly(stored: String, candidate: String): Boolean =
++        stored.equals(candidate.trim(), ignoreCase = true)
++
++    /** One design per file for sharing (import/export picker). */
++    fun exportJson(presets: List<Preset>): String {
++        require(presets.size == 1) { "Export one design at a time" }
++        return presetObject(presets.first()).let { obj ->
++            JSONObject()
++                .put("version", 1)
++                .put("name", obj.getString("name"))
++                .put("face", obj.getString("face"))
++                .put(JSON_KEY_BASE_COLOR, obj.getString(JSON_KEY_BASE_COLOR))
++                .put("buttons", obj.getJSONObject("buttons"))
++                .toString(2)
++        }
++    }
++
++    /** Adds or updates one saved preset after the user picks a single entry from an import file. */
++    fun importSelected(preset: Preset): List<Preset> {
++        val stored = preset.copy(
++            name = preset.name.trim().take(40),
++            body = preset.body or 0xFF000000.toInt()
++        )
++        return save(stored.name, stored.body, stored.face, stored.overrides)
++    }
++
++    private fun writeStorage(presets: List<Preset>) {
++        migrateLegacyStorageIfNeeded()
++        writePresetsToDisk(presets)
++    }
++
++    private fun writePresetsToDisk(presets: List<Preset>) {
++        val target = storageFile()
++        target.parentFile?.mkdirs()
++        val payload = JSONObject()
++            .put("version", 1)
++            .put("presets", JSONArray().also { array ->
++                presets.forEach { preset -> array.put(presetObject(preset)) }
++            })
++            .toString(2)
++        val temp = File(target.parentFile, "${target.name}.tmp")
++        temp.writeText(payload)
++        if (target.exists()) {
++            target.copyTo(backupFile(target), overwrite = true)
++        }
++        if (!temp.renameTo(target)) {
++            target.writeText(payload)
++            temp.delete()
++        }
++    }
++
++    private fun presetObject(preset: Preset): JSONObject {
++        val buttons = JSONObject()
++        preset.overrides.forEach { (id, color) ->
++            buttons.put(id, OverlayColors.hexString(color))
++        }
++        return JSONObject()
++            .put("name", preset.name)
++            .put("face", preset.face)
++            .put(JSON_KEY_BASE_COLOR, OverlayColors.hexString(preset.body))
++            .put("buttons", buttons)
++    }
++
++    private fun parseBaseColorHex(obj: JSONObject): String? {
++        val base = obj.optString(JSON_KEY_BASE_COLOR).trim()
++        if (base.isNotEmpty()) {
++            return base
++        }
++        val legacy = obj.optString(JSON_KEY_SHELL_LEGACY).trim()
++        return legacy.ifEmpty { null }
++    }
++
++    /** Same tree as [org.yuzu.yuzu_emu.features.settings.utils.SettingsFile] (survives app updates). */
++    private fun storageFile(): File {
++        val userDir = runCatching {
++            if (DirectoryInitialization.areDirectoriesReady) {
++                DirectoryInitialization.userDirectory
++            } else {
++                null
++            }
++        }.getOrNull()
++        if (!userDir.isNullOrBlank()) {
++            return File(userDir, USER_DATA_RELATIVE_PATH)
++        }
++        return legacyStorageFile()
++    }
++
++    private fun legacyStorageFile(): File =
++        File(YuzuApplication.appContext.filesDir, LEGACY_JSON_FILE_NAME)
++
++    private fun backupFile(primary: File): File =
++        File(primary.parentFile, "${primary.name}.bak")
++
++    private fun migrateLegacyStorageIfNeeded() {
++        val target = storageFile()
++        target.parentFile?.mkdirs()
++
++        val legacyInternal = legacyStorageFile()
++        if (legacyInternal.exists() && legacyInternal.absolutePath != target.absolutePath) {
++            if (!target.exists()) {
++                legacyInternal.copyTo(target, overwrite = true)
++            } else {
++                writePresetsToDisk(mergePresets(loadFromFile(target), loadFromFile(legacyInternal)))
++            }
++            legacyInternal.renameTo(File(legacyInternal.parent, "$LEGACY_JSON_FILE_NAME.legacy"))
++        }
++
++        val userDir = runCatching {
++            if (DirectoryInitialization.areDirectoriesReady) {
++                DirectoryInitialization.userDirectory
++            } else {
++                null
++            }
++        }.getOrNull()
++        if (userDir.isNullOrBlank()) {
++            return
++        }
++        val legacyConfig = File(userDir, "config/$LEGACY_JSON_FILE_NAME")
++        if (!legacyConfig.exists()) {
++            return
++        }
++        if (!target.exists()) {
++            legacyConfig.copyTo(target, overwrite = true)
++        } else {
++            writePresetsToDisk(mergePresets(loadFromFile(target), loadFromFile(legacyConfig)))
++        }
++        legacyConfig.renameTo(File(legacyConfig.parent, "$LEGACY_JSON_FILE_NAME.legacy"))
++    }
++
++    private fun loadFromFile(file: File): List<Preset> {
++        if (!file.exists()) {
++            return emptyList()
++        }
++        return try {
++            parseDocument(file.readText())
++        } catch (_: Exception) {
++            emptyList()
++        }
++    }
++
++    private fun mergePresets(primary: List<Preset>, extra: List<Preset>): List<Preset> {
++        if (extra.isEmpty()) {
++            return primary
++        }
++        val merged = primary.toMutableList()
++        for (preset in extra) {
++            val duplicateName = merged.any { namesMatchExactly(it.name, preset.name) }
++            val duplicateContent = merged.any { contentSignature(it) == contentSignature(preset) }
++            if (!duplicateName && !duplicateContent) {
++                merged += preset
++            }
++        }
++        return merged
++    }
++
++    private fun parseDocument(raw: String): List<Preset> {
++        val trimmed = raw.trim()
++        if (trimmed.isEmpty()) {
++            return emptyList()
++        }
++        return when {
++            trimmed.startsWith("[") -> parseArray(JSONArray(trimmed))
++            trimmed.startsWith("{") -> {
++                val obj = JSONObject(trimmed)
++                when {
++                    obj.has("presets") -> parseArray(obj.getJSONArray("presets"))
++                    obj.has(JSON_KEY_BASE_COLOR) ||
++                        obj.has(JSON_KEY_SHELL_LEGACY) ||
++                        obj.has("buttons") -> listOf(parsePreset(obj, "Imported"))
++                    else -> emptyList()
++                }
++            }
++            else -> emptyList()
++        }
++    }
++
++    private fun parseArray(array: JSONArray): List<Preset> {
++        val presets = mutableListOf<Preset>()
++        for (index in 0 until array.length()) {
++            val obj = array.optJSONObject(index) ?: continue
++            presets += parsePreset(obj, "Imported ${index + 1}")
++        }
++        return presets
++    }
++
++    private fun parsePreset(obj: JSONObject, fallbackName: String): Preset {
++        val name = obj.optString("name").trim().ifEmpty { fallbackName }.take(40)
++        val body = OverlayColors.parseHex(parseBaseColorHex(obj).orEmpty())
++            ?: OverlayColors.DEFAULT_COLOR
++        val face = OverlayColors.FACE_LETTERS
++        val overrides = linkedMapOf<String, Int>()
++        val buttons = obj.optJSONObject("buttons")
++        if (buttons != null) {
++            val keys = buttons.keys()
++            while (keys.hasNext()) {
++                val id = keys.next()
++                if (OverlayControl.from(id) == null) {
++                    continue
++                }
++                val color = OverlayColors.parseHex(buttons.optString(id)) ?: continue
++                overrides[id] = color
++            }
++        }
++        return Preset(name, body, face, overrides)
++    }
++
++}
+diff --git a/src/android/app/src/main/java/org/yuzu/yuzu_emu/overlay/OverlayPresetPreviewView.kt b/src/android/app/src/main/java/org/yuzu/yuzu_emu/overlay/OverlayPresetPreviewView.kt
+new file mode 100644
+--- /dev/null
++++ b/src/android/app/src/main/java/org/yuzu/yuzu_emu/overlay/OverlayPresetPreviewView.kt
+@@ -0,0 +1,112 @@
++// SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
++// SPDX-License-Identifier: GPL-3.0-or-later
++
++package org.yuzu.yuzu_emu.overlay
++
++import android.content.Context
++import android.content.res.Configuration
++import android.graphics.drawable.GradientDrawable
++import android.util.AttributeSet
++import org.yuzu.yuzu_emu.R
++import android.widget.FrameLayout
++import android.widget.ImageView
++import androidx.core.view.setPadding
++
++/**
++ * Cached bitmap thumbnail of the real overlay layout (see [OverlayPresetThumbnailCache]).
++ */
++class OverlayPresetPreviewView @JvmOverloads constructor(
++    context: Context,
++    attrs: AttributeSet? = null,
++    defStyleAttr: Int = 0
++) : FrameLayout(context, attrs, defStyleAttr) {
++
++    private val previewImage = ImageView(context)
++    private var boundSignature: String? = null
++
++    /** Landscape touch overlay: width / height (matches typical game/emulation layout). */
++    private val landscapeAspect = 16f / 9f
++
++    init {
++        val pad = (4 * resources.displayMetrics.density).toInt()
++        setPadding(pad)
++        background = GradientDrawable().apply {
++            cornerRadius = 8f * resources.displayMetrics.density
++            setColor(0xFF1A1A1E.toInt())
++        }
++        previewImage.scaleType = ImageView.ScaleType.FIT_CENTER
++        previewImage.adjustViewBounds = true
++        previewImage.isClickable = false
++        previewImage.isFocusable = false
++        addView(
++            previewImage,
++            LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT)
++        )
++        isClickable = false
++        isFocusable = false
++    }
++
++    fun setPreset(body: Int, face: String, controlOverrides: Map<String, Int>) {
++        val signature = OverlayPresetThumbnailCache.signature(body, face, controlOverrides)
++        if (signature == boundSignature && previewImage.drawable != null) {
++            return
++        }
++        boundSignature = signature
++        val cached = OverlayPresetThumbnailCache.get(signature)
++        if (cached != null) {
++            previewImage.setImageBitmap(cached)
++            return
++        }
++        previewImage.setImageDrawable(null)
++        OverlayPresetThumbnailCache.request(context, body, face, controlOverrides) { bitmap ->
++            if (boundSignature == signature) {
++                previewImage.setImageBitmap(bitmap)
++            }
++        }
++    }
++
++    override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
++        val widthMode = MeasureSpec.getMode(widthMeasureSpec)
++        val widthSize = MeasureSpec.getSize(widthMeasureSpec)
++
++        val horizontalPad = paddingLeft + paddingRight
++        val verticalPad = paddingTop + paddingBottom
++
++        var innerWidth = when (widthMode) {
++            MeasureSpec.UNSPECIFIED -> widthSize
++            else -> (widthSize - horizontalPad).coerceAtLeast(0)
++        }
++        var innerHeight = (innerWidth / landscapeAspect).toInt().coerceAtLeast(1)
++        if (resources.configuration.orientation == Configuration.ORIENTATION_LANDSCAPE) {
++            val maxHeight = resources.getDimensionPixelSize(R.dimen.overlay_preset_preview_max_height_land)
++            if (innerHeight > maxHeight) {
++                innerHeight = maxHeight
++                innerWidth = (innerHeight * landscapeAspect).toInt().coerceAtLeast(1)
++            }
++        }
++
++        val childWidthSpec = MeasureSpec.makeMeasureSpec(innerWidth, MeasureSpec.EXACTLY)
++        val childHeightSpec = MeasureSpec.makeMeasureSpec(innerHeight, MeasureSpec.EXACTLY)
++        previewImage.measure(childWidthSpec, childHeightSpec)
++
++        val totalWidth = when (widthMode) {
++            MeasureSpec.EXACTLY -> widthSize
++            else -> innerWidth + horizontalPad
++        }
++        val totalHeight = innerHeight + verticalPad
++        setMeasuredDimension(totalWidth, totalHeight)
++    }
++
++    override fun onLayout(changed: Boolean, left: Int, top: Int, right: Int, bottom: Int) {
++        val innerWidth = (right - left) - paddingLeft - paddingRight
++        val innerHeight = (bottom - top) - paddingTop - paddingBottom
++        val childLeft = paddingLeft
++        val childTop = paddingTop
++        previewImage.layout(
++            childLeft,
++            childTop,
++            childLeft + innerWidth,
++            childTop + innerHeight
++        )
++    }
++}
+diff --git a/src/android/app/src/main/java/org/yuzu/yuzu_emu/overlay/OverlayPresetThumbnailCache.kt b/src/android/app/src/main/java/org/yuzu/yuzu_emu/overlay/OverlayPresetThumbnailCache.kt
+new file mode 100644
+--- /dev/null
++++ b/src/android/app/src/main/java/org/yuzu/yuzu_emu/overlay/OverlayPresetThumbnailCache.kt
+@@ -0,0 +1,114 @@
++// SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
++// SPDX-License-Identifier: GPL-3.0-or-later
++
++package org.yuzu.yuzu_emu.overlay
++
++import android.content.Context
++import android.graphics.Bitmap
++import android.graphics.Canvas
++import android.os.Handler
++import android.os.Looper
++import android.util.LruCache
++import android.view.View.MeasureSpec
++
++/**
++ * Renders and caches static overlay preset thumbnails so list scrolling does not rebuild controls.
++ */
++object OverlayPresetThumbnailCache {
++    private const val REFERENCE_WIDTH = 480
++    private const val REFERENCE_HEIGHT = 270
++
++    private val mainHandler = Handler(Looper.getMainLooper())
++    private val cache = LruCache<String, Bitmap>(32)
++    private val inflight = mutableSetOf<String>()
++    private val pendingCallbacks = linkedMapOf<String, MutableList<(Bitmap) -> Unit>>()
++
++    fun signature(body: Int, face: String, overrides: Map<String, Int>): String =
++        OverlayPresetLibrary.contentSignature(body, face, overrides) +
++            "|" + OverlayPreviewLayout.layoutSignature()
++
++    fun evictAll() {
++        cache.evictAll()
++    }
++
++    fun get(key: String): Bitmap? = cache.get(key)
++
++    fun preload(context: Context, body: Int, face: String, overrides: Map<String, Int>) {
++        val key = signature(body, face, overrides)
++        if (cache.get(key) != null || inflight.contains(key)) {
++            return
++        }
++        enqueueRender(context.applicationContext, key, body, face, overrides, null)
++    }
++
++    fun request(
++        context: Context,
++        body: Int,
++        face: String,
++        overrides: Map<String, Int>,
++        onReady: (Bitmap) -> Unit
++    ) {
++        val key = signature(body, face, overrides)
++        val cached = cache.get(key)
++        if (cached != null) {
++            onReady(cached)
++            return
++        }
++        enqueueRender(context.applicationContext, key, body, face, overrides, onReady)
++    }
++
++    private fun enqueueRender(
++        context: Context,
++        key: String,
++        body: Int,
++        face: String,
++        overrides: Map<String, Int>,
++        onReady: ((Bitmap) -> Unit)?
++    ) {
++        if (onReady != null) {
++            pendingCallbacks.getOrPut(key) { mutableListOf() }.add(onReady)
++        }
++        if (!inflight.add(key)) {
++            return
++        }
++        mainHandler.post {
++            try {
++                if (cache.get(key) == null) {
++                    cache.put(key, renderBitmap(context, body, face, overrides))
++                }
++                val bitmap = cache.get(key)!!
++                pendingCallbacks.remove(key)?.forEach { callback -> callback(bitmap) }
++            } finally {
++                inflight.remove(key)
++            }
++        }
++    }
++
++    private fun renderSize(context: Context): Pair<Int, Int> {
++        val density = context.resources.displayMetrics.density
++        val width = (REFERENCE_WIDTH * density).toInt().coerceIn(REFERENCE_WIDTH, 1280)
++        val height = (width * REFERENCE_HEIGHT / REFERENCE_WIDTH).coerceAtLeast(1)
++        return width to height
++    }
++
++    private fun renderBitmap(
++        context: Context,
++        body: Int,
++        face: String,
++        overrides: Map<String, Int>
++    ): Bitmap {
++        val (width, height) = renderSize(context)
++        val overlay = InputOverlay(context, null)
++        overlay.applyStaticPreview(body, face, overrides)
++        val widthSpec = MeasureSpec.makeMeasureSpec(width, MeasureSpec.EXACTLY)
++        val heightSpec = MeasureSpec.makeMeasureSpec(height, MeasureSpec.EXACTLY)
++        overlay.measure(widthSpec, heightSpec)
++        overlay.layout(0, 0, width, height)
++
++        val bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
++        val canvas = Canvas(bitmap)
++        canvas.drawColor(0xFF1A1A1E.toInt())
++        overlay.draw(canvas)
++        return bitmap
++    }
++}
+diff --git a/src/android/app/src/main/java/org/yuzu/yuzu_emu/overlay/OverlayPreviewLayout.kt b/src/android/app/src/main/java/org/yuzu/yuzu_emu/overlay/OverlayPreviewLayout.kt
+new file mode 100644
+--- /dev/null
++++ b/src/android/app/src/main/java/org/yuzu/yuzu_emu/overlay/OverlayPreviewLayout.kt
+@@ -0,0 +1,56 @@
++// SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
++// SPDX-License-Identifier: GPL-3.0-or-later
++
++package org.yuzu.yuzu_emu.overlay
++
++import org.yuzu.yuzu_emu.features.settings.model.IntSetting
++import org.yuzu.yuzu_emu.overlay.model.OverlayControl
++import org.yuzu.yuzu_emu.overlay.model.OverlayControlData
++import org.yuzu.yuzu_emu.utils.NativeConfig
++
++/**
++ * Reads the user's current overlay layout (positions, enabled controls, per-control scale)
++ * for static color previews without modifying saved config.
++ */
++object OverlayPreviewLayout {
++    fun snapshotControlData(): List<OverlayControlData> {
++        val stored = NativeConfig.getOverlayControlData()
++        if (stored.isEmpty()) {
++            return OverlayControl.entries.map { it.toOverlayControlData() }
++        }
++        val byId = stored.associateBy { it.id }.toMutableMap()
++        OverlayControl.entries.forEach { entry ->
++            if (!byId.containsKey(entry.id)) {
++                byId[entry.id] = entry.toOverlayControlData()
++            }
++        }
++        return byId.values.map { data ->
++            data.copy(
++                landscapePosition = data.landscapePosition,
++                portraitPosition = data.portraitPosition,
++                foldablePosition = data.foldablePosition
++            )
++        }
++    }
++
++    /** Fingerprint for thumbnail cache; landscape layout matches in-game landscape overlay. */
++    fun layoutSignature(): String {
++        val scale = IntSetting.OVERLAY_SCALE.getInt()
++        val opacity = IntSetting.OVERLAY_OPACITY.getInt()
++        val controls = snapshotControlData().sortedBy { it.id }
++        val layoutBody = controls.joinToString(";") { data ->
++            buildString {
++                append(data.id)
++                append(':')
++                append(if (data.enabled) 1 else 0)
++                append(':')
++                append(data.landscapePosition.first)
++                append(',')
++                append(data.landscapePosition.second)
++                append(':')
++                append(data.individualScale)
++            }
++        }
++        return "L|$scale|$opacity|$layoutBody"
++    }
++}
+diff --git a/src/android/app/src/main/java/org/yuzu/yuzu_emu/utils/InstallableActions.kt b/src/android/app/src/main/java/org/yuzu/yuzu_emu/utils/InstallableActions.kt
+--- a/src/android/app/src/main/java/org/yuzu/yuzu_emu/utils/InstallableActions.kt
++++ b/src/android/app/src/main/java/org/yuzu/yuzu_emu/utils/InstallableActions.kt
+@@ -18,6 +18,7 @@ import org.yuzu.yuzu_emu.model.GamesViewModel
+ import org.yuzu.yuzu_emu.model.HomeViewModel
+ import org.yuzu.yuzu_emu.model.InstallResult
+ import org.yuzu.yuzu_emu.model.TaskState
++import org.yuzu.yuzu_emu.overlay.OverlayPresetLibrary
+ import java.io.BufferedInputStream
+ import java.io.BufferedOutputStream
+ import java.io.File
+@@ -313,6 +314,7 @@ object InstallableActions {
+             R.string.exporting_user_data,
+             true
+         ) { progressCallback, _ ->
++            OverlayPresetLibrary.prepareForUserDataExport()
+             val zipResult = FileUtil.zipFromInternalStorage(
+                 File(userDirectory),
+                 userDirectory,
+@@ -380,6 +382,7 @@ object InstallableActions {
+                     File(userDirectory),
+                     progressCallback
+                 )
++                OverlayPresetLibrary.onUserDataImportRestored()
+             } catch (_: Exception) {
+                 return@newInstance MessageDialogFragment.newInstance(
+                     activity,
+diff --git a/src/android/app/src/main/jni/android_settings.h b/src/android/app/src/main/jni/android_settings.h
+--- a/src/android/app/src/main/jni/android_settings.h
++++ b/src/android/app/src/main/jni/android_settings.h
+@@ -75,6 +75,15 @@ namespace AndroidSettings {
+                                              Settings::Category::Overlay};
+         Settings::Setting<s32> overlay_opacity{linkage, 100, "control_opacity",
+                                                Settings::Category::Overlay};
++        // Overlay base color (opaque white default). A white multiply-tint leaves stock artwork unchanged.
++        Settings::Setting<s32> overlay_color{linkage, static_cast<s32>(0xFFFFFFFFu), "overlay_color",
++                                             Settings::Category::Overlay,
++                                             Settings::Specialization::Default, true, true};
++        // Per-control tints, "id=AARRGGBB,id=AARRGGBB". Empty means every control uses the base color.
++        Settings::Setting<std::string> overlay_control_colors{linkage, "", "overlay_control_colors",
++                                                              Settings::Category::Overlay,
++                                                              Settings::Specialization::Default, true,
++                                                              true};
+ 
+         Settings::Setting<bool> joystick_rel_center{linkage, true, "joystick_rel_center",
+                                                     Settings::Category::Overlay};
+diff --git a/src/android/app/src/main/res/drawable/facebutton_empty.xml b/src/android/app/src/main/res/drawable/facebutton_empty.xml
+new file mode 100644
+--- /dev/null
++++ b/src/android/app/src/main/res/drawable/facebutton_empty.xml
+@@ -0,0 +1,20 @@
++<vector android:alpha="0.6" android:height="103.61dp"
++    android:viewportHeight="103.61" android:viewportWidth="103.61"
++    android:width="103.61dp"
++    xmlns:aapt="http://schemas.android.com/aapt" xmlns:android="http://schemas.android.com/apk/res/android">
++    <path android:fillAlpha="0.6"
++        android:pathData="M51.8,51.8m-51.8,0a51.8,51.8 0,1 1,103.6 0a51.8,51.8 0,1 1,-103.6 0" android:strokeAlpha="0.6">
++        <aapt:attr name="android:fillColor">
++            <gradient android:centerX="51.8" android:centerY="51.8"
++                android:gradientRadius="51.8" android:type="radial">
++                <item android:color="#FFC3C4C5" android:offset="0.58"/>
++                <item android:color="#FFC6C6C6" android:offset="0.84"/>
++                <item android:color="#FFC7C7C7" android:offset="0.88"/>
++                <item android:color="#FFC2C2C2" android:offset="0.91"/>
++                <item android:color="#FFB5B5B5" android:offset="0.94"/>
++                <item android:color="#FF9E9E9E" android:offset="0.98"/>
++                <item android:color="#FF8F8F8F" android:offset="1"/>
++            </gradient>
++        </aapt:attr>
++    </path>
++</vector>
+diff --git a/src/android/app/src/main/res/drawable/ic_chevron_down.xml b/src/android/app/src/main/res/drawable/ic_chevron_down.xml
+new file mode 100644
+--- /dev/null
++++ b/src/android/app/src/main/res/drawable/ic_chevron_down.xml
+@@ -0,0 +1,10 @@
++<?xml version="1.0" encoding="utf-8"?>
++<vector xmlns:android="http://schemas.android.com/apk/res/android"
++    android:width="24dp"
++    android:height="24dp"
++    android:viewportWidth="24"
++    android:viewportHeight="24">
++    <path
++        android:fillColor="?attr/colorControlNormal"
++        android:pathData="M7.41,8.59L12,13.17l4.59,-4.58L18,10l-6,6 -6,-6z" />
++</vector>
+diff --git a/src/android/app/src/main/res/drawable/ic_chevron_right.xml b/src/android/app/src/main/res/drawable/ic_chevron_right.xml
+new file mode 100644
+--- /dev/null
++++ b/src/android/app/src/main/res/drawable/ic_chevron_right.xml
+@@ -0,0 +1,10 @@
++<?xml version="1.0" encoding="utf-8"?>
++<vector xmlns:android="http://schemas.android.com/apk/res/android"
++    android:width="24dp"
++    android:height="24dp"
++    android:viewportWidth="24"
++    android:viewportHeight="24">
++    <path
++        android:fillColor="?attr/colorControlNormal"
++        android:pathData="M8.59,16.59L13.17,12 8.59,7.41 10,6l6,6 -6,6z" />
++</vector>
+diff --git a/src/android/app/src/main/res/drawable/ic_chevron_up.xml b/src/android/app/src/main/res/drawable/ic_chevron_up.xml
+new file mode 100644
+--- /dev/null
++++ b/src/android/app/src/main/res/drawable/ic_chevron_up.xml
+@@ -0,0 +1,10 @@
++<?xml version="1.0" encoding="utf-8"?>
++<vector xmlns:android="http://schemas.android.com/apk/res/android"
++    android:width="24dp"
++    android:height="24dp"
++    android:viewportWidth="24"
++    android:viewportHeight="24">
++    <path
++        android:fillColor="?attr/colorControlNormal"
++        android:pathData="M7.41,15.41L12,10.83l4.59,4.58L18,14.01l-6,-6 -6,6z" />
++</vector>
+diff --git a/src/android/app/src/main/res/drawable/ic_overlay_color_check.xml b/src/android/app/src/main/res/drawable/ic_overlay_color_check.xml
+new file mode 100644
+--- /dev/null
++++ b/src/android/app/src/main/res/drawable/ic_overlay_color_check.xml
+@@ -0,0 +1,10 @@
++<?xml version="1.0" encoding="utf-8"?>
++<vector xmlns:android="http://schemas.android.com/apk/res/android"
++    android:width="24dp"
++    android:height="24dp"
++    android:viewportWidth="24"
++    android:viewportHeight="24">
++    <path
++        android:fillColor="#FFFFFFFF"
++        android:pathData="M12,2C6.48,2 2,6.48 2,12s4.48,10 10,10 10,-4.48 10,-10S17.52,2 12,2zM10,17l-5,-5 1.41,-1.41L10,14.17l7.59,-7.59L19,8l-9,9z" />
++</vector>
+diff --git a/src/android/app/src/main/res/drawable/overlay_base_color_bar.xml b/src/android/app/src/main/res/drawable/overlay_base_color_bar.xml
+new file mode 100644
+--- /dev/null
++++ b/src/android/app/src/main/res/drawable/overlay_base_color_bar.xml
+@@ -0,0 +1,21 @@
++<vector android:alpha="0.6" android:height="48dp"
++    android:viewportHeight="48" android:viewportWidth="200"
++    android:width="200dp"
++    xmlns:aapt="http://schemas.android.com/aapt" xmlns:android="http://schemas.android.com/apk/res/android">
++    <path android:fillAlpha="0.6"
++        android:pathData="M12,0h176c6.63,0 12,5.37 12,12v24c0,6.63 -5.37,12 -12,12H12c-6.63,0 -12,-5.37 -12,-12V12C0,5.37 5.37,0 12,0z"
++        android:strokeAlpha="0.6">
++        <aapt:attr name="android:fillColor">
++            <gradient android:centerX="100" android:centerY="24"
++                android:gradientRadius="120" android:type="radial">
++                <item android:color="#FFC3C4C5" android:offset="0.58"/>
++                <item android:color="#FFC6C6C6" android:offset="0.84"/>
++                <item android:color="#FFC7C7C7" android:offset="0.88"/>
++                <item android:color="#FFC2C2C2" android:offset="0.91"/>
++                <item android:color="#FFB5B5B5" android:offset="0.94"/>
++                <item android:color="#FF9E9E9E" android:offset="0.98"/>
++                <item android:color="#FF8F8F8F" android:offset="1"/>
++            </gradient>
++        </aapt:attr>
++    </path>
++</vector>
+diff --git a/src/android/app/src/main/res/layout-land/activity_overlay_color.xml b/src/android/app/src/main/res/layout-land/activity_overlay_color.xml
+new file mode 100644
+--- /dev/null
++++ b/src/android/app/src/main/res/layout-land/activity_overlay_color.xml
+@@ -0,0 +1,159 @@
++<?xml version="1.0" encoding="utf-8"?>
++<androidx.coordinatorlayout.widget.CoordinatorLayout xmlns:android="http://schemas.android.com/apk/res/android"
++    xmlns:app="http://schemas.android.com/apk/res-auto"
++    android:id="@+id/overlay_color_root"
++    android:layout_width="match_parent"
++    android:layout_height="match_parent"
++    android:background="?attr/colorSurface">
++
++    <com.google.android.material.appbar.AppBarLayout
++        android:id="@+id/appbar_overlay_color"
++        style="@style/Widget.Eden.TransparentTopAppBarLayout"
++        android:layout_width="match_parent"
++        android:layout_height="wrap_content"
++        android:fitsSystemWindows="true"
++        android:touchscreenBlocksFocus="false">
++
++        <com.google.android.material.appbar.MaterialToolbar
++            android:id="@+id/toolbar_overlay_color"
++            style="@style/Widget.Eden.TransparentTopToolbar"
++            android:layout_width="match_parent"
++            android:layout_height="?attr/actionBarSize"
++            android:touchscreenBlocksFocus="false"
++            app:navigationIcon="@drawable/ic_back"
++            app:title="@string/overlay_color" />
++    </com.google.android.material.appbar.AppBarLayout>
++
++    <androidx.recyclerview.widget.RecyclerView
++        android:id="@+id/list_overlay_color"
++        android:layout_width="match_parent"
++        android:layout_height="match_parent"
++        android:clipToPadding="false"
++        android:paddingBottom="16dp"
++        app:layout_behavior="@string/appbar_scrolling_view_behavior" />
++
++    <androidx.core.widget.NestedScrollView
++        android:id="@+id/editor_scroll"
++        android:layout_width="match_parent"
++        android:layout_height="match_parent"
++        android:clipToPadding="false"
++        android:fillViewport="true"
++        android:visibility="gone"
++        app:layout_behavior="@string/appbar_scrolling_view_behavior">
++
++        <LinearLayout
++            android:layout_width="match_parent"
++            android:layout_height="wrap_content"
++            android:baselineAligned="false"
++            android:orientation="horizontal"
++            android:paddingHorizontal="16dp"
++            android:paddingTop="8dp"
++            android:paddingBottom="24dp">
++
++            <FrameLayout
++                android:layout_width="0dp"
++                android:layout_height="wrap_content"
++                android:layout_gravity="center_vertical"
++                android:layout_marginEnd="16dp"
++                android:layout_weight="0.9">
++
++                <ImageView
++                    android:id="@+id/color_preview_bar"
++                    android:layout_width="match_parent"
++                    android:layout_height="40dp"
++                    android:layout_gravity="center_vertical"
++                    android:contentDescription="@string/overlay_color"
++                    android:scaleType="fitXY"
++                    android:visibility="gone" />
++
++                <ImageView
++                    android:id="@+id/color_preview"
++                    android:layout_width="match_parent"
++                    android:layout_height="wrap_content"
++                    android:layout_gravity="center"
++                    android:adjustViewBounds="true"
++                    android:contentDescription="@string/overlay_color"
++                    android:maxHeight="72dp"
++                    android:paddingVertical="4dp"
++                    android:scaleType="fitCenter"
++                    android:visibility="gone" />
++            </FrameLayout>
++
++            <LinearLayout
++                android:layout_width="0dp"
++                android:layout_height="wrap_content"
++                android:layout_weight="1.1"
++                android:orientation="vertical">
++
++                <TextView
++                    android:id="@+id/red_label"
++                    android:layout_width="wrap_content"
++                    android:layout_height="wrap_content"
++                    android:text="@string/red"
++                    android:textAppearance="?attr/textAppearanceBodyMedium" />
++
++                <com.google.android.material.slider.Slider
++                    android:id="@+id/red_slider"
++                    android:layout_width="match_parent"
++                    android:layout_height="wrap_content"
++                    android:stepSize="1"
++                    android:valueFrom="0"
++                    android:valueTo="255" />
++
++                <TextView
++                    android:id="@+id/green_label"
++                    android:layout_width="wrap_content"
++                    android:layout_height="wrap_content"
++                    android:text="@string/green"
++                    android:textAppearance="?attr/textAppearanceBodyMedium" />
++
++                <com.google.android.material.slider.Slider
++                    android:id="@+id/green_slider"
++                    android:layout_width="match_parent"
++                    android:layout_height="wrap_content"
++                    android:stepSize="1"
++                    android:valueFrom="0"
++                    android:valueTo="255" />
++
++                <TextView
++                    android:id="@+id/blue_label"
++                    android:layout_width="wrap_content"
++                    android:layout_height="wrap_content"
++                    android:text="@string/blue"
++                    android:textAppearance="?attr/textAppearanceBodyMedium" />
++
++                <com.google.android.material.slider.Slider
++                    android:id="@+id/blue_slider"
++                    android:layout_width="match_parent"
++                    android:layout_height="wrap_content"
++                    android:stepSize="1"
++                    android:valueFrom="0"
++                    android:valueTo="255" />
++
++                <com.google.android.material.textfield.TextInputLayout
++                    android:id="@+id/hex_layout"
++                    android:layout_width="match_parent"
++                    android:layout_height="wrap_content"
++                    android:layout_marginTop="4dp"
++                    android:hint="@string/overlay_color_hex">
++
++                    <com.google.android.material.textfield.TextInputEditText
++                        android:id="@+id/hex_input"
++                        android:layout_width="match_parent"
++                        android:layout_height="wrap_content"
++                        android:digits="0123456789ABCDEFabcdef"
++                        android:inputType="textCapCharacters"
++                        android:maxLength="6" />
++                </com.google.android.material.textfield.TextInputLayout>
++
++                <com.google.android.material.button.MaterialButton
++                    android:id="@+id/match_base_color_button"
++                    style="@style/Widget.Material3.Button.TextButton"
++                    android:layout_width="wrap_content"
++                    android:layout_height="wrap_content"
++                    android:layout_gravity="end"
++                    android:text="@string/overlay_color_match_base" />
++            </LinearLayout>
++        </LinearLayout>
++    </androidx.core.widget.NestedScrollView>
++</androidx.coordinatorlayout.widget.CoordinatorLayout>
+diff --git a/src/android/app/src/main/res/layout/activity_overlay_color.xml b/src/android/app/src/main/res/layout/activity_overlay_color.xml
+new file mode 100644
+--- /dev/null
++++ b/src/android/app/src/main/res/layout/activity_overlay_color.xml
+@@ -0,0 +1,148 @@
++<?xml version="1.0" encoding="utf-8"?>
++<androidx.coordinatorlayout.widget.CoordinatorLayout xmlns:android="http://schemas.android.com/apk/res/android"
++    xmlns:app="http://schemas.android.com/apk/res-auto"
++    android:id="@+id/overlay_color_root"
++    android:layout_width="match_parent"
++    android:layout_height="match_parent"
++    android:background="?attr/colorSurface">
++
++    <com.google.android.material.appbar.AppBarLayout
++        android:id="@+id/appbar_overlay_color"
++        style="@style/Widget.Eden.TransparentTopAppBarLayout"
++        android:layout_width="match_parent"
++        android:layout_height="wrap_content"
++        android:fitsSystemWindows="true"
++        android:touchscreenBlocksFocus="false">
++
++        <com.google.android.material.appbar.MaterialToolbar
++            android:id="@+id/toolbar_overlay_color"
++            style="@style/Widget.Eden.TransparentTopToolbar"
++            android:layout_width="match_parent"
++            android:layout_height="?attr/actionBarSize"
++            android:touchscreenBlocksFocus="false"
++            app:navigationIcon="@drawable/ic_back"
++            app:title="@string/overlay_color" />
++    </com.google.android.material.appbar.AppBarLayout>
++
++    <androidx.recyclerview.widget.RecyclerView
++        android:id="@+id/list_overlay_color"
++        android:layout_width="match_parent"
++        android:layout_height="match_parent"
++        android:clipToPadding="false"
++        android:paddingBottom="16dp"
++        app:layout_behavior="@string/appbar_scrolling_view_behavior" />
++
++    <androidx.core.widget.NestedScrollView
++        android:id="@+id/editor_scroll"
++        android:layout_width="match_parent"
++        android:layout_height="match_parent"
++        android:clipToPadding="false"
++        android:visibility="gone"
++        app:layout_behavior="@string/appbar_scrolling_view_behavior">
++
++        <LinearLayout
++            android:layout_width="match_parent"
++            android:layout_height="wrap_content"
++            android:orientation="vertical"
++            android:paddingHorizontal="16dp"
++            android:paddingTop="8dp"
++            android:paddingBottom="24dp">
++
++            <FrameLayout
++                android:layout_width="match_parent"
++                android:layout_height="wrap_content"
++                android:layout_marginBottom="8dp">
++
++                <ImageView
++                    android:id="@+id/color_preview_bar"
++                    android:layout_width="match_parent"
++                    android:layout_height="48dp"
++                    android:contentDescription="@string/overlay_color"
++                    android:scaleType="fitXY"
++                    android:visibility="gone" />
++
++                <ImageView
++                    android:id="@+id/color_preview"
++                    android:layout_width="wrap_content"
++                    android:layout_height="wrap_content"
++                    android:layout_gravity="center_horizontal"
++                    android:adjustViewBounds="true"
++                    android:contentDescription="@string/overlay_color"
++                    android:maxHeight="80dp"
++                    android:paddingVertical="4dp"
++                    android:scaleType="fitCenter"
++                    android:visibility="gone" />
++            </FrameLayout>
++
++            <TextView
++                android:id="@+id/red_label"
++                android:layout_width="wrap_content"
++                android:layout_height="wrap_content"
++                android:layout_marginTop="16dp"
++                android:text="@string/red"
++                android:textAppearance="?attr/textAppearanceBodyMedium" />
++
++            <com.google.android.material.slider.Slider
++                android:id="@+id/red_slider"
++                android:layout_width="match_parent"
++                android:layout_height="wrap_content"
++                android:stepSize="1"
++                android:valueFrom="0"
++                android:valueTo="255" />
++
++            <TextView
++                android:id="@+id/green_label"
++                android:layout_width="wrap_content"
++                android:layout_height="wrap_content"
++                android:text="@string/green"
++                android:textAppearance="?attr/textAppearanceBodyMedium" />
++
++            <com.google.android.material.slider.Slider
++                android:id="@+id/green_slider"
++                android:layout_width="match_parent"
++                android:layout_height="wrap_content"
++                android:stepSize="1"
++                android:valueFrom="0"
++                android:valueTo="255" />
++
++            <TextView
++                android:id="@+id/blue_label"
++                android:layout_width="wrap_content"
++                android:layout_height="wrap_content"
++                android:text="@string/blue"
++                android:textAppearance="?attr/textAppearanceBodyMedium" />
++
++            <com.google.android.material.slider.Slider
++                android:id="@+id/blue_slider"
++                android:layout_width="match_parent"
++                android:layout_height="wrap_content"
++                android:stepSize="1"
++                android:valueFrom="0"
++                android:valueTo="255" />
++
++            <com.google.android.material.textfield.TextInputLayout
++                android:id="@+id/hex_layout"
++                android:layout_width="match_parent"
++                android:layout_height="wrap_content"
++                android:layout_marginTop="8dp"
++                android:hint="@string/overlay_color_hex">
++
++                <com.google.android.material.textfield.TextInputEditText
++                    android:id="@+id/hex_input"
++                    android:layout_width="match_parent"
++                    android:layout_height="wrap_content"
++                    android:digits="0123456789ABCDEFabcdef"
++                    android:inputType="textCapCharacters"
++                    android:maxLength="6" />
++            </com.google.android.material.textfield.TextInputLayout>
++
++            <com.google.android.material.button.MaterialButton
++                android:id="@+id/match_base_color_button"
++                style="@style/Widget.Material3.Button.TextButton"
++                android:layout_width="wrap_content"
++                android:layout_height="wrap_content"
++                android:layout_gravity="end"
++                android:text="@string/overlay_color_match_base" />
++        </LinearLayout>
++    </androidx.core.widget.NestedScrollView>
++</androidx.coordinatorlayout.widget.CoordinatorLayout>
+diff --git a/src/android/app/src/main/res/layout/list_item_overlay_preset.xml b/src/android/app/src/main/res/layout/list_item_overlay_preset.xml
+new file mode 100644
+--- /dev/null
++++ b/src/android/app/src/main/res/layout/list_item_overlay_preset.xml
+@@ -0,0 +1,29 @@
++<?xml version="1.0" encoding="utf-8"?>
++<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
++    xmlns:tools="http://schemas.android.com/tools"
++    android:layout_width="match_parent"
++    android:layout_height="wrap_content"
++    android:background="@drawable/theme_list_item_selector"
++    android:clickable="true"
++    android:focusable="true"
++    android:orientation="vertical"
++    android:paddingHorizontal="16dp"
++    android:paddingTop="12dp"
++    android:paddingBottom="12dp">
++
++    <com.google.android.material.textview.MaterialTextView
++        android:id="@+id/preset_title"
++        style="@style/TextAppearance.Material3.HeadlineMedium"
++        android:layout_width="match_parent"
++        android:layout_height="wrap_content"
++        android:textAlignment="viewStart"
++        android:textSize="17sp"
++        tools:text="GameCube" />
++
++    <org.yuzu.yuzu_emu.overlay.OverlayPresetPreviewView
++        android:id="@+id/preset_preview"
++        android:layout_width="match_parent"
++        android:layout_height="wrap_content"
++        android:layout_marginTop="8dp"
++        android:contentDescription="@string/overlay_color" />
++</LinearLayout>
+diff --git a/src/android/app/src/main/res/menu/menu_overlay_options.xml b/src/android/app/src/main/res/menu/menu_overlay_options.xml
+--- a/src/android/app/src/main/res/menu/menu_overlay_options.xml
++++ b/src/android/app/src/main/res/menu/menu_overlay_options.xml
+@@ -24,6 +24,10 @@
+         android:id="@+id/menu_adjust_overlay"
+         android:title="@string/emulation_control_adjust" />
+ 
++    <item
++        android:id="@+id/menu_overlay_color"
++        android:title="@string/overlay_color" />
++
+     <item
+         android:id="@+id/menu_toggle_controls"
+         android:title="@string/emulation_toggle_controls" />
+diff --git a/src/android/app/src/main/res/values-land/dimens.xml b/src/android/app/src/main/res/values-land/dimens.xml
+new file mode 100644
+--- /dev/null
++++ b/src/android/app/src/main/res/values-land/dimens.xml
+@@ -0,0 +1,5 @@
++<?xml version="1.0" encoding="utf-8"?>
++<resources>
++    <!-- Landscape preset grid: two columns on typical phone/tablet widths. -->
++    <dimen name="overlay_preset_grid_min_column_width">168dp</dimen>
++</resources>
+diff --git a/src/android/app/src/main/res/values/dimens.xml b/src/android/app/src/main/res/values/dimens.xml
+--- a/src/android/app/src/main/res/values/dimens.xml
++++ b/src/android/app/src/main/res/values/dimens.xml
+@@ -19,4 +19,6 @@
+     <dimen name="elevated_app_bar">3dp</dimen>
+ 
+     <dimen name="mapping_anim_size">75dp</dimen>
++    <dimen name="overlay_preset_grid_min_column_width">320dp</dimen>
++    <dimen name="overlay_preset_preview_max_height_land">128dp</dimen>
+ </resources>
+diff --git a/src/android/app/src/main/res/values/strings.xml b/src/android/app/src/main/res/values/strings.xml
+--- a/src/android/app/src/main/res/values/strings.xml
++++ b/src/android/app/src/main/res/values/strings.xml
+@@ -31,6 +31,58 @@
+     <string name="overlay_grid_size">Grid Size</string>
+     <string name="overlay_grid_size_description">Size of the grid cells in pixels</string>
+     <string name="input_overlay_behavior">Behavior</string>
++    <string name="overlay_color">Change overlay color</string>
++    <string name="overlay_color_customize">Customize Overlay Color</string>
++    <string name="overlay_color_customize_summary">Modify the color of the on-screen controls</string>
++    <string name="overlay_color_section_create_use">Create/Use Overlays</string>
++    <string name="overlay_color_section_manage_files">Manage Overlay Files</string>
++    <string name="overlay_import_color_config">Import Color Config</string>
++    <string name="overlay_import_color_config_summary">Load a saved overlay color design from a .edenovl file</string>
++    <string name="overlay_export_color_config">Export Color Config</string>
++    <string name="overlay_export_color_config_summary">Save a custom overlay color design to a .edenovl file</string>
++    <string name="overlay_color_default">Original</string>
++    <string name="overlay_color_hex">Hex Color</string>
++    <string name="overlay_color_presets">Presets</string>
++    <string name="overlay_color_presets_summary">Use a pre-made design or look through your saved custom designs</string>
++    <string name="overlay_color_builtin_header">Pre-made Templates</string>
++    <string name="overlay_color_save_preset_hint">Save your custom design</string>
++    <string name="overlay_color_create_template">Custom Design</string>
++    <string name="overlay_color_create_template_summary">Set the base color and color for each button</string>
++    <string name="overlay_color_base">Base Color</string>
++    <string name="overlay_color_buttons">Buttons</string>
++    <string name="overlay_color_left_stick">Left Stick</string>
++    <string name="overlay_color_right_stick">Right Stick</string>
++    <string name="overlay_color_match_base">Use Base Color</string>
++    <string name="overlay_color_using_base">Using Base Color</string>
++    <string name="overlay_preset_applied">Preset \"%1$s\" applied</string>
++    <string name="overlay_preset_eden">Eden</string>
++    <string name="overlay_preset_joycon">Joy-Con</string>
++    <string name="overlay_preset_super_famicom">Super Famicom</string>
++    <string name="overlay_preset_snes">Super NES</string>
++    <string name="overlay_preset_gamecube">GameCube</string>
++    <string name="overlay_preset_save">Save preset</string>
++    <string name="overlay_preset_name">Preset Name</string>
++    <string name="overlay_preset_saved">Saved %1$s</string>
++    <string name="overlay_preset_saved_header">Saved</string>
++    <string name="overlay_preset_imported_one">Applied %1$s</string>
++    <string name="overlay_import_pick_one">Choose a design to import</string>
++    <string name="overlay_export_pick_one">Choose a design to export</string>
++    <string name="overlay_export_current">Current on-screen colors</string>
++    <string name="overlay_export_none">Nothing to export. Save a custom design first, or change colors away from a built-in preset.</string>
++    <string name="overlay_preset_same_as_builtin">These colors already match %1$s. Use Presets instead of saving a copy.</string>
++    <string name="overlay_preset_name_taken">That name matches a built-in preset. Choose a different name.</string>
++    <string name="overlay_preset_overwrite">Replace saved design?</string>
++    <string name="overlay_preset_overwrite_message">A design named \"%1$s\" is already saved. Replace it with this one?</string>
++    <string name="overlay_preset_overwrite_confirm">Replace</string>
++    <string name="overlay_preset_exported">Design exported</string>
++    <string name="overlay_preset_import_failed">Importing failed, check the file\'s syntax for errors</string>
++    <string name="overlay_import_edenovl_only">Only .edenovl files can be imported</string>
++    <string name="overlay_preset_delete">Delete Preset</string>
++    <string name="overlay_preset_delete_message">Delete %1$s? The colors on screen stay as they are.</string>
++    <string name="overlay_preset_nes">NES</string>
++    <string name="overlay_preset_famicom">Famicom</string>
++    <string name="overlay_stick_left_press">Left Stick Click</string>
++    <string name="overlay_stick_right_press">Right Stick Click</string>
+     <string name="overlay_auto_hide">Overlay Auto Hide</string>
+     <string name="overlay_auto_hide_description">Automatically hide the touch controls overlay after the specified time of inactivity.</string>
+     <string name="enable_input_overlay_auto_hide">Enable Overlay Auto Hide</string>
+@@ -595,6 +647,8 @@
+     <string name="skip_cpu_inner_invalidation_description">Skips certain CPU-side cache invalidations during memory updates, reducing CPU usage and improving it\'s performance. This may cause glitches or crashes on some games.</string>
+     <string name="nce_invalidation_gpu_readback">GPU Readback Before NCE Invalidation</string>
+     <string name="nce_invalidation_gpu_readback_description">Temporary. Fix Ender Magnolia (and other UE titles) crashes. May reduce performance. Improvement in progress.</string>
++    <string name="nce_runtime_nro_patch">Patch Runtime NROs for NCE</string>
++    <string name="nce_runtime_nro_patch_description">Temporary. Fix Biomutant boot. May impact performance. Improvement in progress.</string>
+     <string name="fix_bloom_effects">Fix Bloom Effects</string>
+     <string name="fix_bloom_effects_description">Reduces bloom blur in LA/EOW (Adreno A6XX - A7XX/ Turnip), removes bloom in Burnout. Warning: may cause graphical artifacts in other games.</string>
+     <string name="emulate_bgr565">Emulate BGR565</string>
